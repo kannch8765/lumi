@@ -241,7 +241,7 @@ vulnerabilities into Layer A.
 ```
             Layer B (Claude writes code)          Layer A (Lumi runs)
             ───────────────────────────          ──────────────────
-            
+
   Claude writes new tool ───────────────► Tool appears in Lumi's set
        │                                        │
        │         ┌── pre-commit ──┐              │

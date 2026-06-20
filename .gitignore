@@ -10,14 +10,19 @@ env/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.ty/
 .coverage
 htmlcov/
 .tox/
 
 # ADK / Agents CLI
+.adk/
 .google-agents-cli/
 agents-cli-manifest.yaml
 adk_web.log
+
+# Claude Code (local AI assistant state — never commit)
+.claude/
 
 # Secrets — NEVER commit
 .env
@@ -26,6 +31,7 @@ adk_web.log
 *.pem
 secrets/
 service-account*.json
+gcp-credentials*.json
 
 # IDE
 .vscode/
@@ -47,3 +53,5 @@ build/
 artifacts/
 logs/
 *.log
+.saved_chats
+.persist_vector_store
