@@ -1,0 +1,84 @@
+rules:
+  # ─── Hardcoded secret detection ────────────────────────────────────────
+  # These patterns cover the major LLM API key formats. Any match blocks
+  # the commit. Real keys live in .env (gitignored).
+
+  - id: detect-hardcoded-google-api-key
+    pattern-regex: 'AIzaSy[A-Za-z0-9_\-]{30,}'
+    message: "Security Issue: Hardcoded Google API key prefix detected."
+    languages: [python]
+    severity: ERROR
+
+  - id: detect-hardcoded-google-ai-studio-key
+    pattern-regex: 'AQ\.Ab8[A-Za-z0-9_\-]{20,}'
+    message: "Security Issue: Hardcoded Google AI Studio key prefix detected."
+    languages: [python]
+    severity: ERROR
+
+  - id: detect-hardcoded-openai-api-key
+    pattern-regex: 'sk-(proj-)?[A-Za-z0-9]{20,}'
+    message: "Security Issue: Hardcoded OpenAI API key prefix detected."
+    languages: [python]
+    severity: ERROR
+
+  - id: detect-hardcoded-anthropic-api-key
+    pattern-regex: 'sk-ant-[A-Za-z0-9_\-]{20,}'
+    message: "Security Issue: Hardcoded Anthropic API key prefix detected."
+    languages: [python]
+    severity: ERROR
+
+  # ─── Lumi kill switch — banned tools ────────────────────────────────────
+  # These tools would expand Lumi's attack surface beyond what ARCHITECTURE.md
+  # permits. The tool whitelist IS the kill switch (Two-Layer model §Layer A).
+  # Adding any of these patterns requires updating ARCHITECTURE.md first.
+
+  - id: lumi-no-transfer-money-tool
+    pattern-either:
+      - pattern: |
+          def transfer_money(...):
+              ...
+      - pattern: |
+          def send_payment(...):
+              ...
+      - pattern: |
+          def wire_funds(...):
+              ...
+    message: >-
+      Lumi ARCHITECTURE.md bans payment tools. The tool whitelist is the
+      kill switch — adding a payment tool would expand Lumi's attack surface
+      beyond the documented agent limitations.
+    languages: [python]
+    severity: ERROR
+
+  - id: lumi-no-account-creation-tool
+    pattern-either:
+      - pattern: |
+          def create_account(...):
+              ...
+      - pattern: |
+          def register_user(...):
+              ...
+      - pattern: |
+          def signup_for_service(...):
+              ...
+    message: >-
+      Lumi ARCHITECTURE.md bans account-creation tools. Lumi never creates
+      accounts on the user's behalf — it surfaces free resources and lets
+      the user sign up themselves.
+    languages: [python]
+    severity: ERROR
+
+  - id: lumi-no-arbitrary-url-fetch
+    pattern-either:
+      - pattern: |
+          def fetch_url(...):
+              ...
+      - pattern: |
+          def browse(...):
+              ...
+    message: >-
+      Lumi ARCHITECTURE.md restricts web access to the dedicated web-search
+      MCP server only. Direct URL fetching is an indirect-prompt-injection
+      vector (threat_model.md §PI.7, §PI.8).
+    languages: [python]
+    severity: ERROR

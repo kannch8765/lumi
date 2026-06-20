@@ -13,19 +13,22 @@ repos:
     hooks:
       - id: ruff-check
         name: Ruff Lint
-        entry: uv run ruff check
-        language: system
+        language: python
+        entry: ruff check
+        additional_dependencies: ["ruff>=0.4.6"]
         types: [python]
         pass_filenames: false
       - id: ruff-format
         name: Ruff Format
-        entry: uv run ruff format --check
-        language: system
+        language: python
+        entry: ruff format --check
+        additional_dependencies: ["ruff>=0.4.6"]
         types: [python]
         pass_filenames: false
       - id: semgrep
         name: Semgrep Security Scan
-        entry: uv run semgrep --error --config .semgrep/rules.yaml
-        language: system
+        language: python
+        entry: semgrep --error --config .semgrep/rules.yaml
+        additional_dependencies: ["semgrep>=1.100.0"]
         types: [python]
         pass_filenames: false
