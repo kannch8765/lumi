@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ADK / Agents CLI
+.google-agents-cli/
+agents-cli-manifest.yaml
+adk_web.log
+
+# Secrets — NEVER commit
+.env
+.env.*
+*.key
+*.pem
+secrets/
+service-account*.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build / dist
+dist/
+build/
+*.egg-info/
+*.whl
+
+# Project
+artifacts/
+logs/
+*.log
