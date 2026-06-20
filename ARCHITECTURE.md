@@ -167,6 +167,112 @@ Same 5-layer architecture proven in the secure-agent-lab codelab:
 | **L5** runtime invariants | Pydantic schemas, locks, replay protection | T (runtime safety) |
 | **Outer shell** | .gitignore, chmod 600, .env, pytest gate | I + regression |
 
+## Two-Layer Control Model (L0–L5)
+
+> **Key principle**: *"If a control lives in the prompt, the LLM can
+> ignore it."* Real hard controls live OUTSIDE the agent's conversation
+> context — in code, schemas, infrastructure, and developer tooling.
+>
+> Lumi has **two separate layers of hard controls**, each with its own
+> L0–L5 stack, serving different audiences.
+
+### Layer A — Lumi product (protects the **end user**)
+
+These controls govern the deployed Lumi agent when real students use it.
+
+| Level | Control | Mechanism | What it prevents |
+|---|---|---|---|
+| **L0** Entry | Input rate limit | Per-IP/session token bucket | Abuse / DoS |
+| | Request validation | Pydantic on raw input | Type confusion / injection |
+| | Ephemeral session | No disk write, lost on exit | PII persistence |
+| **L1** Tool whitelist | Tool registration | Only MCP-exposed tools exist | Calling arbitrary tools / URLs |
+| | Tool input schema | Pydantic at tool boundary | Wrong-type parameters |
+| | Tool output sanitization | Schema + scrubbing | PII leaking into LLM context |
+| **L2** MCP server boundary | Resource catalog MCP | Curated static data, LLM can't edit | Hallucinated / fabricated resources |
+| | Search MCP | Bounded results, keyword filter | Wandering to random URLs |
+| | MCP auth | Only Lumi's agents can call | Third parties calling our MCP |
+| **L3** Agent logic | L1 Identity | Profile extracted, Pydantic-validated | Bad profile / type errors |
+| | L2 Eligibility | Rules in **code** (geo/age dict), not prompt | Skipping eligibility |
+| | L3 Level Filter | Level in catalog metadata, code-queried | Fudging difficulty |
+| | L4 Timeline | Pydantic datetime, code-computed deadline | Wrong dates / fake freshness |
+| | Pipeline ordering | Orchestrator code forces L1→L2→L3→L4 | Skipping a layer |
+| **L4** Model output | Output schema | Final response is structured | Free-text PII leak |
+| | Refusal surfacing | LLM refusals shown verbatim to user | Hiding model anomalies |
+| | Hallucination guard | Only catalog + search hits returned | LLM fabrication |
+| **L5** Deployment / infra | HTTPS only | Cloud Run enforces TLS | MITM |
+| | API key in .env | `chmod 600`, gitignored | Key leak |
+| | Audit log | Every recommendation recorded, PII-free | Untraceable / PII in logs |
+| | Deploy isolation | Cloud Run ≠ dev machine | Dev environment exposure |
+
+### Layer B — Claude coding Lumi (protects the **codebase**)
+
+These controls govern me (Claude) when writing the Lumi code in this
+project. They make sure the development process doesn't introduce
+vulnerabilities into Layer A.
+
+| Level | Control | Mechanism | What it prevents |
+|---|---|---|---|
+| **L0** Input boundary | Project CLAUDE.md | Read at session start | Claude going off-topic / touching wrong project |
+| | Codebase scope | Only edit `lumi/`, never sibling repos | Modifying `secure-agent-lab` etc. |
+| | Commit rules | `git config` + CLAUDE.md | Claude impersonating Antigravity / Claude |
+| **L1** Code generation | Pydantic schemas | Required on every tool input | Weak types / bad schemas |
+| | Type hints | mypy must pass | Runtime type errors |
+| | English comments | Locked in CLAUDE.md | `ゆう` / `宝宝` / 喵 leaking into code |
+| | No secrets in code | `.env` + pre-commit catches | Keys in git |
+| | No mocks in tests | Outcome-based, locked in CLAUDE.md | False-green / testing the wrong thing |
+| **L2** Pre-commit | semgrep secrets | Custom rule, blocks `AIza*` / `AQ.*` | Key commits |
+| | ruff / black | Style enforcement | Style drift |
+| | pytest gate | Must pass before commit | Regressions / false-green |
+| | No co-authored-by AI | CLAUDE.md + commit-msg hook | Claude leaving its name |
+| **L3** Code review | Manual user review | Every PR reviewed by ゆう | Architectural drift |
+| | Architecture compliance | Cross-check vs ARCHITECTURE.md | Deviating from design |
+| | Threat model check | Cross-check vs CONTEXT.md / STRIDE | Missing security boundary |
+| **L4** Repo / workspace | Branching | Feature branches, master protected | Mistakenly editing main |
+| | .gitignore | `.env` / `.venv` / `artifacts/` | Junk files in git |
+| | Test isolation | pytest fixtures, no global state | Test pollution |
+| | CHANGELOG | Per-release note | Untraceable changes |
+| **L5** Infra | Secrets in .env | `chmod 600` | Keys lying around |
+| | Per-project .venv | No shared dependency tree | Dep conflicts / pollution |
+| | Pre-commit installed | Each repo, once | Forgotten install |
+| | CI/CD (future) | Tests run on push | Break-after-push surprise |
+
+### The bridge — how Layer B choices propagate to Layer A
+
+```
+            Layer B (Claude writes code)          Layer A (Lumi runs)
+            ───────────────────────────          ──────────────────
+            
+  Claude writes new tool ───────────────► Tool appears in Lumi's set
+       │                                        │
+       │         ┌── pre-commit ──┐              │
+       ├────────►│  semgrep       │──────────────┤
+       │         │  pytest        │  blocks bad  │
+       │         │  ruff          │   code from  │
+       │         └────────────────┘  reaching    │
+       │                              Layer A    │
+       │                                        │
+  Claude writes Pydantic schema ──────► runtime validation in Layer A
+       │                                        │
+       │                                        ▼
+  Claude writes STRIDE threat model ─► risks explicit, reviewed at L3
+```
+
+**Key insights**:
+
+- **Pre-commit IS the handoff** — it doesn't just catch "developer
+  mistakes", it stops code that *would become* a runtime vulnerability
+  in Layer A. This is the literal "shift left" mechanism.
+- **Pydantic schema has dual citizenship** — it's written by Claude
+  (Layer B) and enforced at runtime by Lumi (Layer A). The same artifact
+  protects in both worlds.
+- **STRIDE threat model is shared** — it covers both development-time
+  risks (e.g., Claude introducing a vulnerability) AND runtime risks
+  (e.g., Lumi hallucinating). One threat model, two consumers.
+- **Claude's L1 choices directly determine Layer A's attack surface**:
+  if Claude adds a `transfer_money` tool (Layer B), then Lumi *can*
+  transfer money (Layer A). The tool whitelist is the most important
+  Layer B → Layer A interface.
+
 ## Track
 
 Kaggle Capstone: **Agents for Good** — "advancing education" via accessible
