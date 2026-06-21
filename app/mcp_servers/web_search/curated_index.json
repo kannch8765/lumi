@@ -1,0 +1,122 @@
+[
+  {
+    "title": "Kaggle - Google Gemini Long Context Window Competition",
+    "url": "https://www.kaggle.com/competitions/google-gemini-long-context",
+    "snippet": "Recent Kaggle competition using Gemini's 2M-token context window for document Q&A. Free GPU notebooks, cash prizes, runs through Q3 2026.",
+    "source": "kaggle",
+    "date_discovered": "2026-06-18",
+    "relevance_keywords": ["gemini", "long-context", "competition", "kaggle", "transformer", "rag", "llm"]
+  },
+  {
+    "title": "EleutherAI - GPT-NeoX-20B Open Weights Release",
+    "url": "https://huggingface.co/EleutherAI/gpt-neox-20b",
+    "snippet": "Open-weights 20B parameter language model release with inference notebooks and a free Hugging Face inference endpoint quota.",
+    "source": "huggingface",
+    "date_discovered": "2026-06-15",
+    "relevance_keywords": ["llm", "open-weights", "gpt-neox", "transformer", "inference", "huggingface"]
+  },
+  {
+    "title": "GitHub - nanoMoE: Minimal Mixture-of-Experts in PyTorch",
+    "url": "https://github.com/lumi-moe/nanomoe",
+    "snippet": "Educational 50-line PyTorch implementation of a mixture-of-experts layer with a Colab walkthrough. MIT-licensed, free to use.",
+    "source": "github",
+    "date_discovered": "2026-06-17",
+    "relevance_keywords": ["mixture-of-experts", "pytorch", "moe", "transformer", "deep-learning", "github"]
+  },
+  {
+    "title": "Stanford CS336 - Language Modeling From Scratch (Spring 2026)",
+    "url": "https://stanford-cs336.github.io/spring2026/",
+    "snippet": "New Stanford course on building LLMs from the tokenizer up. Lecture videos and problem sets freely available; runs parallel to CS224n.",
+    "source": "stanford",
+    "date_discovered": "2026-06-12",
+    "relevance_keywords": ["stanford", "language-modeling", "llm", "course", "transformer", "from-scratch", "tokenizer"]
+  },
+  {
+    "title": "MIT 6.S184 - Generative AI Flow (IAP 2026)",
+    "url": "https://flow.mit.edu/",
+    "snippet": "MIT's new three-week IAP course on diffusion flow-matching and rectified flow models. Free lecture notes, problem sets, and a final project gallery.",
+    "source": "mit",
+    "date_discovered": "2026-06-10",
+    "relevance_keywords": ["mit", "diffusion", "flow-matching", "generative-ai", "course", "rectified-flow"]
+  },
+  {
+    "title": "Hugging Face Spaces - Free Whisper Transcription Demo",
+    "url": "https://huggingface.co/spaces/openai/whisper",
+    "snippet": "Official OpenAI Whisper Space running on free HF GPU. No signup required for short audio clips; great for speech recognition practice.",
+    "source": "huggingface",
+    "date_discovered": "2026-06-16",
+    "relevance_keywords": ["whisper", "speech-recognition", "asr", "openai", "huggingface", "audio", "transformers"]
+  },
+  {
+    "title": "DeepLearning.AI - Building Evaluations for LLM Applications",
+    "url": "https://www.deeplearning.ai/short-courses/building-evaluations-llm-applications/",
+    "snippet": "New 90-minute short course on building offline + LLM-as-judge evals. Free with a free account; pairs with the agents course.",
+    "source": "deeplearning.ai",
+    "date_discovered": "2026-06-14",
+    "relevance_keywords": ["evals", "llm", "evaluation", "short-course", "agents", "rag", "llm-as-judge"]
+  },
+  {
+    "title": "Anthropic - Free Claude API Credits for Students (Pilot)",
+    "url": "https://www.anthropic.com/education",
+    "snippet": "Limited pilot program: verified university students get a small monthly Claude API credit. Email-domain verification required.",
+    "source": "anthropic",
+    "date_discovered": "2026-06-19",
+    "relevance_keywords": ["anthropic", "claude", "api", "credit", "student", "llm", "education"]
+  },
+  {
+    "title": "Modal - Free $30 Monthly GPU Credit (Verified Students)",
+    "url": "https://modal.com/students",
+    "snippet": "Modal gives verified students a recurring monthly GPU credit for A10G / H100 jobs. .edu email required; ideal for fine-tuning labs.",
+    "source": "modal",
+    "date_discovered": "2026-06-11",
+    "relevance_keywords": ["modal", "gpu", "credit", "student", "fine-tuning", "cloud", "a10g"]
+  },
+  {
+    "title": "Papers with Code - Trending Benchmarks June 2026",
+    "url": "https://paperswithcode.com/",
+    "snippet": "Aggregator of SOTA results across ML benchmarks. Free, community-driven, with code links and dataset cards for every leaderboard entry.",
+    "source": "paperswith-code",
+    "date_discovered": "2026-06-13",
+    "relevance_keywords": ["papers", "benchmarks", "sota", "research", "code", "leaderboard", "ml"]
+  },
+  {
+    "title": "Kaggle - AI Agents Intensive Capstone Track (Companion)",
+    "url": "https://www.kaggle.com/learn/ai-agents-intensive",
+    "snippet": "Companion Kaggle micro-course for the 5-day Agents Intensive: 5 lessons, 5 codelabs, and a final capstone project template.",
+    "source": "kaggle",
+    "date_discovered": "2026-06-20",
+    "relevance_keywords": ["agents", "kaggle", "intensive", "capstone", "course", "adk", "llm", "tool-use"]
+  },
+  {
+    "title": "arXiv - Recent Survey on Small Language Models (June 2026)",
+    "url": "https://arxiv.org/abs/2606.01234",
+    "snippet": "Survey of small (<3B parameter) language models with training recipes, evaluation suites, and deployment tips. Open-access PDF.",
+    "source": "arxiv",
+    "date_discovered": "2026-06-09",
+    "relevance_keywords": ["arxiv", "survey", "small-language-model", "slm", "llm", "research", "paper"]
+  },
+  {
+    "title": "Google Cloud - Free Generative AI Studio for Students",
+    "url": "https://cloud.google.com/edu/students",
+    "snippet": "Google for Education: free Vertex AI and Generative AI Studio credits for verified students. Includes Gemini Pro and Embeddings quotas.",
+    "source": "google",
+    "date_discovered": "2026-06-08",
+    "relevance_keywords": ["google", "vertex-ai", "gemini", "credit", "student", "llm", "embeddings", "education"]
+  },
+  {
+    "title": "Modal Blog - Free Stable Diffusion XL Fine-Tuning Recipe",
+    "url": "https://modal.com/blog/sdxl-finetune",
+    "snippet": "Open walkthrough of fine-tuning SDXL on a custom dataset using Modal's free student tier. Includes dataset prep and evaluation notebook.",
+    "source": "modal",
+    "date_discovered": "2026-06-07",
+    "relevance_keywords": ["stable-diffusion", "sdxl", "diffusion", "fine-tuning", "image-generation", "modal", "open-source"]
+  },
+  {
+    "title": "Hugging Face - Smol Course v2 (Compact Language Models)",
+    "url": "https://github.com/huggingface/smol-course/releases/tag/v2",
+    "snippet": "New release of the smol-course covering SmolLM3 and post-training alignment. Free on GitHub, runs on Colab free tier GPUs.",
+    "source": "github",
+    "date_discovered": "2026-06-06",
+    "relevance_keywords": ["smol-course", "smollm", "language-model", "alignment", "post-training", "huggingface", "transformers", "llm"]
+  }
+]
