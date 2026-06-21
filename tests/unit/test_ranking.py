@@ -261,9 +261,8 @@ def test_ranking_does_not_mutate_input() -> None:
 
 def test_ranking_preserves_metadata() -> None:
     """``today`` and ``reasoning`` survive into the ranked output."""
-    from datetime import date
 
-    today = date(2026, 6, 21)
+    today = "2026-06-21"
     result = TimelineResult(
         ranked=[_entry("A", Urgency.CRITICAL)],
         today=today,

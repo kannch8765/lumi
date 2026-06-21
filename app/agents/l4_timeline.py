@@ -24,10 +24,13 @@ SECURITY MODEL
 
 from __future__ import annotations
 
+import sys
+
 from google.adk.agents import LlmAgent
 from google.adk.models.google_llm import Gemini
 from google.adk.tools.mcp_tool import McpToolset
-from mcp import StdioServerParameters
+from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams
+from mcp.client.stdio import StdioServerParameters
 
 from app.agents._tool_filters import RESOURCE_CATALOG_TOOL_NAMES, WEB_SEARCH_TOOL_NAMES
 from app.agents.schemas import TimelineResult
@@ -92,9 +95,14 @@ def _build_resource_catalog_toolset() -> McpToolset:
     """
 
     return McpToolset(
-        connection_params=StdioServerParameters(
-            command="uv",
-            args=["run", "python", "-m", "app.mcp_servers.resource_catalog"],
+        connection_params=StdioConnectionParams(
+            # Use the parent process's `sys.executable` — see L2 for
+            # why we don't go through `uv run` here.
+            server_params=StdioServerParameters(
+                command=sys.executable,
+                args=["-m", "app.mcp_servers.resource_catalog"],
+            ),
+            timeout=10.0,
         ),
         tool_filter=list(RESOURCE_CATALOG_TOOL_NAMES),
     )
@@ -110,9 +118,14 @@ def _build_web_search_toolset() -> McpToolset:
     """
 
     return McpToolset(
-        connection_params=StdioServerParameters(
-            command="uv",
-            args=["run", "python", "-m", "app.mcp_servers.web_search"],
+        connection_params=StdioConnectionParams(
+            # Use the parent process's `sys.executable` — see L2 for
+            # why we don't go through `uv run` here.
+            server_params=StdioServerParameters(
+                command=sys.executable,
+                args=["-m", "app.mcp_servers.web_search"],
+            ),
+            timeout=10.0,
         ),
         tool_filter=list(WEB_SEARCH_TOOL_NAMES),
     )
@@ -130,7 +143,7 @@ def _build_all_mcp_tools() -> list[McpToolset]:
     return [_build_resource_catalog_toolset(), _build_web_search_toolset()]
 
 
-def create_l4_timeline_agent(model: str = "gemini-2.5-flash") -> LlmAgent:
+def create_l4_timeline_agent(model: str = "gemini-3.1-flash-lite") -> LlmAgent:
     """Factory for the L4 Timeline Agent.
 
     Reads the L3 result (session state `level_filter`) and the user's

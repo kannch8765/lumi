@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 # filtering, so Flash-tier is sufficient everywhere. Overridable per
 # call via ``create_lumi_pipeline(model=...)`` so tests can swap in a
 # stub model without touching the default.
-DEFAULT_PIPELINE_MODEL = "gemini-2.5-flash"
+DEFAULT_PIPELINE_MODEL = "gemini-3.1-flash-lite"
 
 # Session identifiers used by :func:`run_lumi_query`. The values are
 # arbitrary stable strings — they only need to be deterministic so
@@ -76,6 +76,39 @@ STATE_KEY_ELIGIBILITY = "eligibility"
 STATE_KEY_LEVEL_FILTER = "level_filter"
 STATE_KEY_TIMELINE = "timeline"
 STATE_KEY_RANKED_TIMELINE = "ranked_timeline"
+
+
+def _coerce_timeline(value: Any) -> TimelineResult | None:
+    """Coerce a session-state value back to :class:`TimelineResult`.
+
+    ADK 2.2.0 stores structured ``output_schema`` payloads as plain
+    ``dict`` in session state (the ``CallbackContext.state`` view
+    shows them as dicts, not typed models). When the ranker callback
+    reads ``state['timeline']`` and the orchestrator reads
+    ``state['ranked_timeline']``, we need to coerce the dict back
+    to the typed model so downstream callers always see the
+    contract type.
+
+    Accepts:
+    - ``TimelineResult`` instance → returned as-is.
+    - ``dict`` matching the schema → validated into ``TimelineResult``.
+    - Anything else → ``None`` (caller should fall back to empty).
+
+    Returns ``None`` on validation failure rather than raising so a
+    single bad layer doesn't bring down the whole pipeline.
+    """
+    if isinstance(value, TimelineResult):
+        return value
+    if isinstance(value, dict):
+        try:
+            return TimelineResult.model_validate(value)
+        except Exception:  # fallback only — see docstring above
+            logger.warning(
+                "ranker callback: failed to coerce dict to TimelineResult",
+                exc_info=True,
+            )
+            return None
+    return None
 
 
 def _build_ranker_agent() -> LlmAgent:
@@ -94,7 +127,7 @@ def _build_ranker_agent() -> LlmAgent:
     """
     return LlmAgent(
         name="timeline_ranker",
-        model="gemini-2.5-flash",  # never invoked — see after_agent_callback
+        model="gemini-3.1-flash-lite",  # never invoked — see after_agent_callback
         instruction=(
             "No-op. The real ranking work is performed in code by the "
             "after_agent_callback. Do not emit any text."
@@ -131,12 +164,11 @@ def _rank_after_agent(
         logger.warning("ranker callback: no state on callback_context")
         return genai_types.Content(role="model", parts=[])
 
-    raw_timeline = state.get(STATE_KEY_TIMELINE)
-    if not isinstance(raw_timeline, TimelineResult):
+    raw_timeline = _coerce_timeline(state.get(STATE_KEY_TIMELINE))
+    if raw_timeline is None:
         logger.warning(
-            "ranker callback: state['%s'] is missing or wrong type (%s)",
+            "ranker callback: state['%s'] is missing or wrong type",
             STATE_KEY_TIMELINE,
-            type(raw_timeline).__name__,
         )
         return genai_types.Content(role="model", parts=[])
 
@@ -164,7 +196,7 @@ def create_lumi_pipeline(
 
     Args:
         model: Gemini model name passed to each L-layer agent.
-            Defaults to ``gemini-2.5-flash`` (low-latency, low-cost).
+            Defaults to ``gemini-3.1-flash-lite`` (low-latency, low-cost).
             Override only for testing or for routing specific layers
             to a different model tier via the individual factories.
 
@@ -255,10 +287,18 @@ async def run_lumi_query(query: str) -> TimelineResult:
     # fall back to the L4 output so callers still get a structured
     # payload if ranking was skipped (e.g. L4 returned an empty
     # timeline and the ranker was a no-op).
+    #
+    # ADK 2.2.0 serializes structured ``output_schema`` payloads to
+    # plain ``dict`` before writing them to session state (the
+    # ``CallbackContext.state`` view shows them as dicts). We coerce
+    # back to the typed model so downstream code (``rank_timeline_entries``,
+    # tests, the FastAPI handler) always sees the contract type.
     ranked = state.get(STATE_KEY_RANKED_TIMELINE)
-    if isinstance(ranked, TimelineResult):
+    ranked = _coerce_timeline(ranked)
+    if ranked is not None:
         return ranked
     raw = state.get(STATE_KEY_TIMELINE)
-    if isinstance(raw, TimelineResult):
+    raw = _coerce_timeline(raw)
+    if raw is not None:
         return rank_timeline_entries(raw)
     return TimelineResult()

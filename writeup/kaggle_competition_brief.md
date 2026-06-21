@@ -14,7 +14,7 @@
 | Type | Hackathon / capstone project |
 | Lumi track | **Agents for Good** |
 | Announced | 2026-06-19 (during the 5-Day livestream) |
-| Submissions due | **2026-07-06 11:59 PM PT** (16 days from snapshot) |
+| Submissions due | **2026-07-06 11:59 PM PT** (15 days from snapshot) |
 | Prize | Kaggle swag (non-monetary) — 3 awards per track |
 | Entrants / Participants / Teams / Submissions | 2,622 / 79 / 77 / 77 |
 | Citation | Brenda Flynn, Kanchana Patlolla, Polong Lin, Anant Nawalgaria, Fran Hinkelmann, Kinjal Parekh, Melissa Nalubwama-Mukasa, María Cruz, and Naz Bayrak. *AI Agents: Intensive Vibe Coding Capstone Project.* <https://kaggle.com/competitions/vibecoding-agents-capstone-project>, 2026. Kaggle. |
@@ -119,7 +119,7 @@ Mapping each Kaggle requirement to our task status:
 | Kaggle requirement | Lumi status | Notes |
 |---|---|---|
 | Track: Agents for Good | ✅ Selected | Mission = free AI learning resources for students worldwide |
-| Key concept 1: Multi-agent system (ADK) | ✅ 4-layer pipeline | L1 → L2 → L3 → L4 + parallel output ranker |
+| Key concept 1: Multi-agent system (ADK) | ✅ 4-layer pipeline | L1 → L2 → L3 → L4 (SequentialAgent) + ranker (parallel output stage) |
 | Key concept 2: MCP Server | ✅ 2 servers | `resource-catalog` (3 tools) + `web-search` (1 tool) |
 | Key concept 3: Antigravity | 🟡 TBD — Task 28 | Demo video (Task 28 — owner-led) |
 | Key concept 4: Security features | ✅ Defense-in-depth | Schema caps, tool whitelist, semgrep, prompt-injection suite (161 tests) |
@@ -128,7 +128,7 @@ Mapping each Kaggle requirement to our task status:
 | Kaggle Writeup (≤ 2,500 words) | 🟡 §1-5 done | §6-7 pending real run data — Task 39 |
 | Media Gallery (cover image) | ❌ Task 40 | Not started |
 | Public Video (≤ 5 min) | ❌ Task 28 | Not started |
-| Public Project Link | 🟡 | Repo: <https://github.com/kannch8765/lumi> ; live URL pending Task 27 |
+| Public Project Link | ✅ | Repo: <https://github.com/kannch8765/lumi> (already public); live demo URL pending Task 27 |
 | Documentation: README.md | ✅ | Project root |
 | No API keys in code | ✅ | `.env` gitignored, semgrep blocks AIza/sk-/AQ/ghp_ patterns |
 

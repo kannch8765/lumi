@@ -34,10 +34,13 @@ switch per CONTEXT.md #10).
 
 from __future__ import annotations
 
+import sys
+
 from google.adk.agents import LlmAgent
 from google.adk.models import Gemini
 from google.adk.tools.mcp_tool import McpToolset
-from mcp import StdioServerParameters
+from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams
+from mcp.client.stdio import StdioServerParameters
 
 from app.agents._tool_filters import RESOURCE_CATALOG_TOOL_NAMES
 from app.agents.schemas import EligibilityResult
@@ -45,7 +48,7 @@ from app.agents.schemas import EligibilityResult
 # Default Gemini model for L2. L2 reasons over a small set of catalog
 # entries (max 50 per ``search_catalog`` call), so a Flash-tier model
 # is sufficient. Override only for testing.
-DEFAULT_L2_MODEL = "gemini-2.5-flash"
+DEFAULT_L2_MODEL = "gemini-3.1-flash-lite"
 
 # System prompt for L2. Three explicit zones per CONTEXT.md #18
 # (instruction hierarchy): USER zone data, TOOL zone data (catalog
@@ -118,9 +121,18 @@ def _build_resource_catalog_toolset() -> McpToolset:
         are visible to L2 (CONTEXT.md #10 — tool whitelist).
     """
     return McpToolset(
-        connection_params=StdioServerParameters(
-            command="python",
-            args=["-m", "app.mcp_servers.resource_catalog"],
+        connection_params=StdioConnectionParams(
+            # Use the parent process's `sys.executable` so the subprocess
+            # inherits the same venv (and the same mcp version). Calling
+            # `uv run python` here caused uv to fail parsing uv.lock on
+            # its own startup, which crashed the MCP server before the
+            # first request — the Lumi known gotcha described in
+            # `.claude/PLAN.md` was a symptom, not the cause.
+            server_params=StdioServerParameters(
+                command=sys.executable,
+                args=["-m", "app.mcp_servers.resource_catalog"],
+            ),
+            timeout=10.0,
         ),
         tool_filter=list(RESOURCE_CATALOG_TOOL_NAMES),
     )
@@ -144,7 +156,7 @@ def create_l2_eligibility_agent(model: str = DEFAULT_L2_MODEL) -> LlmAgent:
     resulting :class:`EligibilityResult` to L3 (Level Filter).
 
     Args:
-        model: Gemini model name. Defaults to ``gemini-2.5-flash``
+        model: Gemini model name. Defaults to ``gemini-3.1-flash-lite``
             (low-latency, low-cost model suitable for catalog
             filtering). Override only for testing or for routing L2
             to a different model tier.

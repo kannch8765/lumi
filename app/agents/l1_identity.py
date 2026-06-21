@@ -24,7 +24,7 @@ from app.agents.schemas import IdentityProfile
 # Default Gemini model. Picked for low latency and low cost — L1 runs
 # on every request and only does structured extraction, so the
 # smallest Flash-tier model is sufficient.
-DEFAULT_L1_MODEL = "gemini-2.5-flash"
+DEFAULT_L1_MODEL = "gemini-3.1-flash-lite"
 
 # System prompt for L1. Three explicit zones per CONTEXT.md #18
 # (instruction hierarchy): USER zone data is treated as data, the
@@ -83,7 +83,7 @@ def create_l1_identity_agent(model: str = DEFAULT_L1_MODEL) -> LlmAgent:
     resulting :class:`IdentityProfile` to L2 Eligibility Search.
 
     Args:
-        model: Gemini model name. Defaults to ``gemini-2.5-flash``
+        model: Gemini model name. Defaults to ``gemini-3.1-flash-lite``
             (low-latency, low-cost model suitable for structured
             extraction). Override only for testing or for routing
             L1 to a different model tier.

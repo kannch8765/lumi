@@ -23,7 +23,6 @@ per CONTEXT.md rule #7.
 from __future__ import annotations
 
 import re
-from datetime import date
 
 import pytest
 from pydantic import ValidationError
@@ -893,21 +892,33 @@ def test_provider_does_not_crash_on_non_english_injection_in_snippet() -> None:
 # ── 12. Date confusion ───────────────────────────────────────────────
 
 
-def test_today_field_rejects_year_1900_via_date_type() -> None:
-    """`TimelineResult.today` is a `date`; the constructor accepts any
-    date object, so this test confirms the type is `date` and
-    documents that the LLM could pass a historical date (no
-    min_date enforcement)."""
-    result = TimelineResult(today=date(1900, 1, 1))
-    assert result.today == date(1900, 1, 1)  # no min_date enforcement
+def test_today_field_accepts_historical_iso_string() -> None:
+    """`TimelineResult.today` is stored as ISO 8601 str (max_length=10
+    caps the field). The LLM could pass any 10-char string in
+    practice; the schema does not enforce a min-date — the L4
+    instruction is what anchors "today" semantically. This test just
+    confirms the round-trip works."""
+    result = TimelineResult(today="1900-01-01")
+    assert result.today == "1900-01-01"
 
 
-def test_today_field_accepts_far_future_date() -> None:
+def test_today_field_accepts_far_future_iso_string() -> None:
     """A year-3000 `today` is accepted; the L4 instruction says
     compute relative to today, so a far-future today is a design
     anomaly (not a security issue) but worth documenting."""
-    result = TimelineResult(today=date(3000, 1, 1))
-    assert result.today.year == 3000
+    result = TimelineResult(today="3000-01-01")
+    assert result.today.startswith("3000")
+
+
+def test_today_field_rejects_overlong_string() -> None:
+    """Length cap (max_length=10) closes the DoS surface flagged by
+    the field's old `date` type — a malicious LLM forging a
+    kilobyte-long "today" string now fails at validation time."""
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        TimelineResult(today="2026-06-21" + "x" * 100)
 
 
 # ── 13. Reasoning field injection ─────────────────────────────────────

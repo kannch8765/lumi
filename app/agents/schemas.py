@@ -223,7 +223,13 @@ class TimelineResult(BaseModel):
     """
 
     ranked: list[TimelineEntry] = Field(default_factory=list, max_length=50)
-    today: date = Field(default_factory=date.today)
+    # ISO 8601 date string (e.g. "2026-06-21"). Stored as ``str`` rather
+    # than ``date`` so that ADK's session-state JSON serialization can
+    # round-trip the field without needing a custom encoder. The L4
+    # agent is allowed to override this (it sometimes uses "today" as
+    # a freshness anchor); we accept whatever the LLM sets, but only
+    # up to a length cap.
+    today: str = Field(default_factory=lambda: date.today().isoformat(), max_length=10)
     reasoning: str = Field(default="", max_length=1000)
 
 

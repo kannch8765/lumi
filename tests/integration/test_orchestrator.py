@@ -99,7 +99,7 @@ def test_pipeline_sub_agents_use_documented_output_keys() -> None:
 
 def test_pipeline_default_model_is_flash() -> None:
     """The default model constant is the Flash-tier Gemini model."""
-    assert DEFAULT_PIPELINE_MODEL == "gemini-2.5-flash"
+    assert DEFAULT_PIPELINE_MODEL == "gemini-3.1-flash-lite"
 
 
 def test_pipeline_orchestrator_has_no_tools() -> None:

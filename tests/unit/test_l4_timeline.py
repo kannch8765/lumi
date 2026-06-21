@@ -98,8 +98,10 @@ def test_timeline_result_validates_empty() -> None:
     result = TimelineResult()
     assert result.ranked == []
     assert result.reasoning == ""
-    # `today` defaults to date.today() at construction time.
-    assert isinstance(result.today, date)
+    # `today` defaults to today() as an ISO 8601 string (see schema note
+    # about why we store it as str rather than date).
+    assert isinstance(result.today, str)
+    assert result.today == date.today().isoformat()
 
 
 def test_timeline_result_validates_with_entries() -> None:
@@ -112,12 +114,12 @@ def test_timeline_result_validates_with_entries() -> None:
     )
     result = TimelineResult(
         ranked=[entry],
-        today=date(2026, 6, 21),
+        today="2026-06-21",
         reasoning="one high-urgency resource",
     )
     assert len(result.ranked) == 1
     assert result.ranked[0].urgency == Urgency.HIGH
-    assert result.today == date(2026, 6, 21)
+    assert result.today == "2026-06-21"
 
 
 def test_timeline_entry_urgency_enum() -> None:

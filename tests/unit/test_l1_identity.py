@@ -70,7 +70,7 @@ def test_agent_default_model_is_flash() -> None:
     Locked in so the orchestrator can rely on the default latency
     profile and so accidental model upgrades are intentional.
     """
-    assert DEFAULT_L1_MODEL == "gemini-2.5-flash"
+    assert DEFAULT_L1_MODEL == "gemini-3.1-flash-lite"
     agent = create_l1_identity_agent()
     # ``model`` is wrapped in a ``Gemini`` instance. Read the
     # underlying string back from the Pydantic field.

@@ -9,7 +9,7 @@ license = {text = "MIT"}
 
 dependencies = [
     "google-adk[gcp]>=2.0.0,<3.0.0",
-    "mcp[cli]>=1.0.0,<2.0.0",
+    "mcp[cli]>=1.24.0,<2.0.0",  # ADK 2.2.0 passes sampling_capabilities kwarg; mcp <1.24 lacks it
     "pydantic>=2.5.0,<3.0.0",
     "fastapi>=0.115.0,<1.0.0",
     "uvicorn>=0.30.0,<1.0.0",
@@ -86,10 +86,24 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 
+# Force the resolver to ignore the semgrep<1.100 conflict on
+# Python 3.13 / win32 markers — semgrep is a dev-only lint tool
+# and we don't ship for that combination. Without this override
+# `uv lock` fails with "No solution found" on the 3.13 split.
+[tool.uv]
+required-version = ">=0.5.0"
+override-dependencies = [
+    "semgrep>=1.100.0,<2.0.0; sys_platform != 'win32' or python_version < '3.13'",
+]
+
+
 [tool.pytest.ini_options]
 pythonpath = "."
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+markers = [
+    "manual: end-to-end tests that call real LLM APIs (consume quota, never run in CI by default)",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["app", "frontend"]

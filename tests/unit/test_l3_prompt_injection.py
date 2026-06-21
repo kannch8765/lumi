@@ -615,9 +615,9 @@ def test_factory_default_model_is_documented() -> None:
     against a silent model swap that could weaken or remove the
     three-zone hierarchy. (Smoke test on the factory contract.)"""
 
-    assert DEFAULT_L3_MODEL == "gemini-2.5-flash"
+    assert DEFAULT_L3_MODEL == "gemini-3.1-flash-lite"
     agent = create_l3_level_agent()
     # The model's string form should contain the model name; the ADK
     # Gemini wrapper keeps it on ``.model``.
     model_repr = getattr(agent.model, "model", None) or str(agent.model)
-    assert "gemini-2.5-flash" in model_repr
+    assert "gemini-3.1-flash-lite" in model_repr

@@ -22,10 +22,13 @@ SECURITY MODEL
 
 from __future__ import annotations
 
+import sys
+
 from google.adk.agents import LlmAgent
 from google.adk.models.google_llm import Gemini
 from google.adk.tools.mcp_tool import McpToolset
-from mcp import StdioServerParameters
+from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams
+from mcp.client.stdio import StdioServerParameters
 
 from app.agents._tool_filters import RESOURCE_CATALOG_TOOL_NAMES
 from app.agents.schemas import LevelFilterResult
@@ -33,7 +36,7 @@ from app.agents.schemas import LevelFilterResult
 # Default Gemini model. Picked for low latency — L3 does structured
 # classification + scoring on a bounded candidate set, so the smallest
 # Flash-tier model is sufficient.
-DEFAULT_L3_MODEL = "gemini-2.5-flash"
+DEFAULT_L3_MODEL = "gemini-3.1-flash-lite"
 
 # Instruction text — kept here so the agent factory stays readable.
 # Three-zone hierarchy per CONTEXT.md #18: USER / TOOL / INSTRUCTION.
@@ -99,9 +102,15 @@ def _build_resource_catalog_toolset() -> McpToolset:
     """
 
     return McpToolset(
-        connection_params=StdioServerParameters(
-            command="uv",
-            args=["run", "python", "-m", "app.mcp_servers.resource_catalog"],
+        connection_params=StdioConnectionParams(
+            # Use the parent process's `sys.executable` — see L2 for
+            # why we don't go through `uv run` here (uv would try to
+            # parse uv.lock and fail before starting the subprocess).
+            server_params=StdioServerParameters(
+                command=sys.executable,
+                args=["-m", "app.mcp_servers.resource_catalog"],
+            ),
+            timeout=10.0,
         ),
         tool_filter=list(RESOURCE_CATALOG_TOOL_NAMES),
     )
@@ -122,7 +131,7 @@ def create_l3_level_agent(model: str = DEFAULT_L3_MODEL) -> LlmAgent:
     ``state['level_filter']`` to feed L4.
 
     Args:
-        model: Gemini model name. Defaults to ``gemini-2.5-flash``
+        model: Gemini model name. Defaults to ``gemini-3.1-flash-lite``
             (low-latency, low-cost model suitable for structured
             classification on a bounded set).
     """
