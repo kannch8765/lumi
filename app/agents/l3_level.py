@@ -27,6 +27,7 @@ from google.adk.models.google_llm import Gemini
 from google.adk.tools.mcp_tool import McpToolset
 from mcp import StdioServerParameters
 
+from app.agents._tool_filters import RESOURCE_CATALOG_TOOL_NAMES
 from app.agents.schemas import LevelFilterResult
 
 # Default Gemini model. Picked for low latency — L3 does structured
@@ -101,7 +102,8 @@ def _build_resource_catalog_toolset() -> McpToolset:
         connection_params=StdioServerParameters(
             command="uv",
             args=["run", "python", "-m", "app.mcp_servers.resource_catalog"],
-        )
+        ),
+        tool_filter=list(RESOURCE_CATALOG_TOOL_NAMES),
     )
 
 

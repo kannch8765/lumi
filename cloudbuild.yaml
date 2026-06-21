@@ -1,0 +1,77 @@
+# Lumi — Google Cloud Build configuration.
+#
+# Builds the container image from the existing ./Dockerfile and pushes it
+# to Artifact Registry. Designed for both manual invocation and a Cloud
+# Build trigger bound to the `master` branch.
+#
+# Usage:
+#   gcloud builds submit --config=cloudbuild.yaml \
+#       --substitutions=SHORT_SHA=$(git rev-parse --short HEAD),_REGION=us-central1
+#
+# Trigger (push to master, once created):
+#   gcloud builds triggers create github \
+#       --repo-name=lumi --repo-owner=kannch8765 --branch-pattern="^master$" \
+#       --build-config=cloudbuild.yaml \
+#       --substitutions=_REGION=us-central1,_REPO=lumi
+#
+# NOTE: PROJECT_ID is intentionally NOT hardcoded. Supply via the trigger
+# substitution `_PROJECT_ID` (or pass `--project=<your-project-id>` to
+# `gcloud builds submit`). See deploy/README.md for the full pipeline.
+
+# Build timeout: 10 minutes. `uv sync` against a warm cache is ~30s;
+# 10 minutes is generous for a clean install on a small machine.
+timeout: 600s
+
+# Cache uv + pip artifacts between builds by re-using a layer cache
+# keyed on the previous successful image. `--cache-from` pulls the
+# `latest` tag as a cache source so Docker can reuse unchanged layers.
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+
+substitutions:
+  _REGION: us-central1
+  _REPO: lumi
+  # _PROJECT_ID must be supplied by the trigger or `gcloud builds submit`.
+  # Default empty so accidental local builds without --substitutions fail
+  # loud rather than push to the wrong project.
+  _PROJECT_ID: ""
+
+steps:
+  # ---- 1. Build the image using the existing Dockerfile ----
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        if [ -z "${_PROJECT_ID}" ]; then
+          echo "ERROR: _PROJECT_ID substitution is empty." >&2
+          echo "Pass --substitutions=_PROJECT_ID=<your-project-id> or configure the trigger." >&2
+          exit 1
+        fi
+        IMAGE="${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/lumi:${SHORT_SHA:-latest}"
+        docker build \
+          --build-arg COMMIT_SHA="${SHORT_SHA:-}" \
+          --cache-from "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/lumi:latest" \
+          --tag "${IMAGE}" \
+          --tag "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/lumi:latest" \
+          -f Dockerfile \
+          .
+        echo "Built: ${IMAGE}"
+
+  # ---- 2. Push both tags (immutable SHA + mutable :latest) ----
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        docker push "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/lumi:${SHORT_SHA:-latest}"
+        docker push "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/lumi:latest"
+
+images:
+  - "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/lumi:${SHORT_SHA:-latest}"
+  - "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/lumi:latest"

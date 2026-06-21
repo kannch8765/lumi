@@ -29,6 +29,7 @@ from google.adk.models.google_llm import Gemini
 from google.adk.tools.mcp_tool import McpToolset
 from mcp import StdioServerParameters
 
+from app.agents._tool_filters import RESOURCE_CATALOG_TOOL_NAMES, WEB_SEARCH_TOOL_NAMES
 from app.agents.schemas import TimelineResult
 
 # Instruction text — kept here so the agent factory stays readable.
@@ -86,14 +87,16 @@ def _build_resource_catalog_toolset() -> McpToolset:
     The MCP server runs as a stdio subprocess that the ADK orchestrator
     launches. We use `uv run` so the subprocess resolves the same
     project venv as the orchestrator (Lumi known gotcha #1 in
-    `.claude/PLAN.md`).
+    `.claude/PLAN.md`). ``tool_filter`` restricts the agent to the
+    three allow-listed catalog tools (CONTEXT.md #10).
     """
 
     return McpToolset(
         connection_params=StdioServerParameters(
             command="uv",
             args=["run", "python", "-m", "app.mcp_servers.resource_catalog"],
-        )
+        ),
+        tool_filter=list(RESOURCE_CATALOG_TOOL_NAMES),
     )
 
 
@@ -102,14 +105,16 @@ def _build_web_search_toolset() -> McpToolset:
 
     Same launch pattern as the catalog — uv-run stdio subprocess.
     Per CONTEXT.md #14, the LLM must treat search output as data
-    only, not as instructions.
+    only, not as instructions. ``tool_filter`` restricts the agent to
+    the single allow-listed search tool (CONTEXT.md #10).
     """
 
     return McpToolset(
         connection_params=StdioServerParameters(
             command="uv",
             args=["run", "python", "-m", "app.mcp_servers.web_search"],
-        )
+        ),
+        tool_filter=list(WEB_SEARCH_TOOL_NAMES),
     )
 
 

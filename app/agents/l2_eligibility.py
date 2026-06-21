@@ -39,22 +39,13 @@ from google.adk.models import Gemini
 from google.adk.tools.mcp_tool import McpToolset
 from mcp import StdioServerParameters
 
+from app.agents._tool_filters import RESOURCE_CATALOG_TOOL_NAMES
 from app.agents.schemas import EligibilityResult
 
 # Default Gemini model for L2. L2 reasons over a small set of catalog
 # entries (max 50 per ``search_catalog`` call), so a Flash-tier model
 # is sufficient. Override only for testing.
 DEFAULT_L2_MODEL = "gemini-2.5-flash"
-
-# Names of the three tools the resource-catalog MCP server exposes.
-# Passed to ``McpToolset(tool_filter=...)`` so L2 cannot accidentally
-# discover or call any other tool, even if the MCP server is later
-# expanded (defense in depth on top of the tool whitelist).
-RESOURCE_CATALOG_TOOL_NAMES = (
-    "search_catalog",
-    "get_resource_by_id",
-    "list_by_type",
-)
 
 # System prompt for L2. Three explicit zones per CONTEXT.md #18
 # (instruction hierarchy): USER zone data, TOOL zone data (catalog
