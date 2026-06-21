@@ -173,7 +173,16 @@ def _rank_after_agent(
         return genai_types.Content(role="model", parts=[])
 
     ranked = rank_timeline_entries(raw_timeline)
-    state[STATE_KEY_RANKED_TIMELINE] = ranked
+    # ADK 2.2.0 persists session state to JSON after the runner
+    # finishes. Pydantic models aren't JSON-serializable by default,
+    # so we store the dict form here and re-coerce on read in
+    # :func:`run_lumi_query` (see ``_coerce_timeline``). The
+    # E2E test (Task 45) hides this — ``InMemorySessionService``
+    # doesn't persist, so the bug only surfaces in the ADK CLI
+    # (``adk run`` / ``adk web``) which uses the persistent
+    # ``SessionService`` path. Discovered while wiring up
+    # ``app/agents/agent.py`` (Task 56).
+    state[STATE_KEY_RANKED_TIMELINE] = ranked.model_dump(mode="json")
     logger.debug("ranker callback: sorted %d timeline entries", len(ranked.ranked))
     return genai_types.Content(role="model", parts=[])
 
