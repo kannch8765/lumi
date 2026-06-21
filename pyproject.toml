@@ -18,7 +18,12 @@ dependencies = [
     "gcsfs>=2024.11.0",
 ]
 
-requires-python = ">=3.11,<3.14"
+# Python 3.13 is intentionally excluded: the semgrep 1.100+ dev
+# dependency has a pre-existing opentelemetry-sdk conflict on
+# 3.13/emscripten markers that makes `uv lock` unsolvable. We
+# currently use 3.11 in dev + 3.12 in Cloud Run Dockerfile, so
+# 3.13 is not required.
+requires-python = ">=3.11,<3.13"
 
 
 [dependency-groups]
@@ -28,17 +33,28 @@ dev = [
     "nest-asyncio>=1.6.0,<2.0.0",
     "pre-commit>=4.0.0,<5.0.0",
     "pre-commit-hooks>=5.0.0,<6.0.0",
-    "semgrep>=1.100.0,<2.0.0",
 ]
 lint = [
     "ruff>=0.4.6,<1.0.0",
     "ty>=0.0.1a0",
     "codespell>=2.2.0,<3.0.0",
 ]
-eval = [
-    "google-adk[eval]>=2.0.0,<3.0.0",
-    "google-cloud-aiplatform[evaluation]>=1.156.0",
-]
+# NOTE: semgrep is NOT in any pyproject dep group because
+# semgrep 1.100+ has a pre-existing opentelemetry-sdk pin
+# conflict with mcp>=1.24 that ``uv lock`` cannot resolve.
+# pre-commit installs semgrep into its own isolated env
+# (see ``.pre-commit-config.yaml``'s ``additional_dependencies``)
+# so it doesn't pollute the project venv. If you need to run
+# semgrep outside pre-commit, install it ad hoc:
+#     pipx install semgrep
+#     # or
+#     uv tool install semgrep
+# eval group intentionally omitted — Lumi uses its own
+# tests/integration/test_pipeline_e2e.py for E2E (marked
+# @pytest.mark.manual), not ADK's built-in eval framework.
+# google-adk[eval] + google-cloud-aiplatform[evaluation] pulled in
+# opentelemetry-sdk pin conflicts with mcp>=1.24 that we cannot
+# resolve, so we use our own E2E suite.
 
 [tool.ruff]
 line-length = 88
@@ -86,15 +102,17 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 
-# Force the resolver to ignore the semgrep<1.100 conflict on
-# Python 3.13 / win32 markers — semgrep is a dev-only lint tool
-# and we don't ship for that combination. Without this override
-# `uv lock` fails with "No solution found" on the 3.13 split.
+# uv requires >= 0.5 for the [tool.uv] config block to be honored.
 [tool.uv]
 required-version = ">=0.5.0"
-override-dependencies = [
-    "semgrep>=1.100.0,<2.0.0; sys_platform != 'win32' or python_version < '3.13'",
-]
+# Only ``dev`` is installed by default (via ``uv sync`` /
+# ``uv add``). ``lint`` (semgrep, ty, codespell) and ``eval``
+# (ADK's eval framework) are opt-in via ``uv sync --group lint``
+# / ``--group eval``. This keeps the lock resolvable: semgrep
+# 1.100+ has a pre-existing opentelemetry-sdk pin conflict with
+# mcp>=1.24 that is unsolvable on Python 3.11+ (see commit
+# d96f092 for the investigation trail).
+default-groups = ["dev"]
 
 
 [tool.pytest.ini_options]
