@@ -32,3 +32,10 @@ repos:
         additional_dependencies: ["semgrep>=1.100.0"]
         types: [python]
         pass_filenames: false
+      - id: lumi-guard
+        name: Lumi personal info + author guard
+        language: python
+        entry: python scripts/pre_commit_hooks/lumi_guard.py
+        additional_dependencies: []
+        types: [file]
+        pass_filenames: false
