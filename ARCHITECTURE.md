@@ -114,7 +114,38 @@
   - Guarantee continued availability
   - Reserve seats or queue on behalf of user
 
+### Pipeline orchestrator (`app/orchestrator.py`)
+
+The four LlmAgents are wired by `google.adk.agents.SequentialAgent` in
+`create_lumi_pipeline()`. Session state keys chain: `identity` →
+`eligibility` → `level_filter` → `timeline`. A final ranking step
+(an `LlmAgent` shell with an `after_agent_callback` wrapping
+`app.ranking.py:rank_timeline_entries`) sorts the L4 output by
+urgency, deadline proximity, and resource name.
+
+The orchestrator itself has **no tools** — it is pure delegation
+(CONTEXT.md #10 — tool whitelist is the kill switch).
+
+Known tech debt: `SequentialAgent` is deprecated in ADK 2.x in
+favor of `Workflow`. The pipeline shape migrates cleanly; the
+ranker-as-LlmAgent trick may need a `BaseAgent` subclass after the
+migration.
+
 ## Parallel Output Stage
+
+The output ranking is **deterministic and code-only** (no LLM in the
+loop). `app/ranking.py` exposes two pure functions:
+
+- `rank_timeline_entries(result)` — returns a new `TimelineResult`
+  with `ranked` sorted by (urgency, days_until_deadline, name).
+  Urgency follows the canonical enum order: CRITICAL → HIGH →
+  MEDIUM → LOW → STALE.
+- `explain_ranking(result)` — returns a one-line-per-entry
+  human-readable summary for the UI.
+
+This stage runs as a `SequentialAgent`'s `after_agent_callback`, so
+the orchestrator's wall-clock cost is bounded by the slowest
+agent's MCP round-trip + O(n log n) sort time.
 
 Multiple ranking strategies can run in parallel and merge:
 
@@ -167,6 +198,15 @@ Same 5-layer architecture proven in the secure-agent-lab codelab:
 | **L5** runtime invariants | Pydantic schemas, locks, replay protection | T (runtime safety) |
 | **Outer shell** | .gitignore, chmod 600, .env, pytest gate | I + regression |
 
+### Schema field-level length caps (Layer A L1, committed 2fa170d)
+
+Every user-influenced Pydantic field has `min_length` /
+`max_length` / `ge` / `le` constraints. Oversized payloads
+(1 MB reasoning strings, 100k-entry lists, 99999-day deadlines)
+are rejected at the validation boundary, not in the LLM call.
+This closes the D.1 (DoS via context overflow) family of
+threats before they can materialize.
+
 ## Two-Layer Control Model (L0–L5)
 
 > **Key principle**: *"If a control lives in the prompt, the LLM can
@@ -214,17 +254,17 @@ vulnerabilities into Layer A.
 |---|---|---|---|
 | **L0** Input boundary | Project CLAUDE.md | Read at session start | Claude going off-topic / touching wrong project |
 | | Codebase scope | Only edit `lumi/`, never sibling repos | Modifying `secure-agent-lab` etc. |
-| | Commit rules | `git config` + CLAUDE.md | Claude impersonating Antigravity / Claude |
+| | Commit rules | `git config` + CLAUDE.md | AI product impersonation in git history |
 | **L1** Code generation | Pydantic schemas | Required on every tool input | Weak types / bad schemas |
 | | Type hints | mypy must pass | Runtime type errors |
-| | English comments | Locked in CLAUDE.md | `ゆう` / `宝宝` / 喵 leaking into code |
+| | English comments | Locked in CLAUDE.md | Private nicknames / AI product names leaking into code |
 | | No secrets in code | `.env` + pre-commit catches | Keys in git |
 | | No mocks in tests | Outcome-based, locked in CLAUDE.md | False-green / testing the wrong thing |
 | **L2** Pre-commit | semgrep secrets | Custom rule, blocks `AIza*` / `AQ.*` | Key commits |
 | | ruff / black | Style enforcement | Style drift |
 | | pytest gate | Must pass before commit | Regressions / false-green |
 | | No co-authored-by AI | CLAUDE.md + commit-msg hook | Claude leaving its name |
-| **L3** Code review | Manual user review | Every PR reviewed by ゆう | Architectural drift |
+| **L3** Code review | Manual user review | Every PR reviewed by the project owner | Architectural drift |
 | | Architecture compliance | Cross-check vs ARCHITECTURE.md | Deviating from design |
 | | Threat model check | Cross-check vs CONTEXT.md / STRIDE | Missing security boundary |
 | **L4** Repo / workspace | Branching | Feature branches, master protected | Mistakenly editing main |
@@ -235,6 +275,13 @@ vulnerabilities into Layer A.
 | | Per-project .venv | No shared dependency tree | Dep conflicts / pollution |
 | | Pre-commit installed | Each repo, once | Forgotten install |
 | | CI/CD (future) | Tests run on push | Break-after-push surprise |
+
+### Unified tool_filter module (Layer B → Layer A, committed d914e55)
+
+`app/agents/_tool_filters.py` exports `RESOURCE_CATALOG_TOOL_NAMES`
+and `WEB_SEARCH_TOOL_NAMES`. Every `McpToolset` in L2, L3, L4
+imports these constants and passes them via `tool_filter=`.
+Drift between layers is impossible because there is one tuple.
 
 ### The bridge — how Layer B choices propagate to Layer A
 
@@ -318,6 +365,7 @@ lot of the threat surface by construction:
 | **No arbitrary URL browsing** | Layer A L2 | Agent can only see catalog + search results, never raw HTML |
 | **No payment / account tools** | Layer A L1 | Architectural: those tools don't exist |
 | **Ephemeral session** | Layer A L0 | No persistent state for injection to corrupt |
+| **Schema-enforced injection bounds** (Task 47, committed 2fa170d) | Layer A L1 | A jailbroken LLM cannot emit megabyte-sized reasoning strings, 100k-entry ranked lists, or 99999-day deadlines — the schema rejects them at the validation boundary before they reach any downstream consumer. This is defense-in-depth on top of the three-zone prompt hierarchy: even if the LLM is fooled into outputting an oversized payload, the boundary catches it. |
 
 ### Additional defenses to add (cataloged by layer)
 
@@ -352,6 +400,21 @@ internal calls.)
 These will become `TestPromptInjection` classes in
 `tests/unit/test_*_injection.py` (one per agent, mirroring the
 boundary test style from shopping-assistant).
+
+### Test coverage (committed d914e55)
+
+Lumi's prompt injection test suite has 161 adversarial tests across
+4 files (`tests/unit/test_l{1,2,3,4}_prompt_injection.py`):
+
+- Out-of-bounds numerics (age=99999, confidence=2.0, deadline=99999d)
+- Direct instruction override ("ignore previous instructions")
+- Indirect injection via resource descriptions and web-search snippets
+- Tool-name smuggling (transfer_money, create_account)
+- Multilingual payloads (Chinese, Japanese, Spanish, French, German)
+- Edge-case boundary values (whitespace, RTL override, zero-width space)
+
+The full test suite is 276 passing + 1 skipped (live Gemini tests
+gated on `GEMINI_API_KEY`).
 
 ## Track
 

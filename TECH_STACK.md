@@ -115,6 +115,31 @@
 - **Port 8080 + uvicorn pattern** — Dockerfile CMD matches shop-assistant
   exactly. Reusable mental model.
 
+## Deployment — Cloud Run (Task 27 prep, committed d914e55)
+
+- **Target**: Google Cloud Run (fully managed, scale-to-zero,
+  `--allow-unauthenticated` for the Kaggle demo)
+- **Container image**: `Dockerfile` — `python:3.12-slim` + `uv`
+  for dependency resolution + `uvicorn app.fast_api_app:app` on
+  port 8080
+- **Registry**: Artifact Registry (not the deprecated Container
+  Registry). Format: `${_REGION}-docker.pkg.dev/${_PROJECT_ID}/lumi/lumi:${SHORT_SHA}`
+- **Build**: `cloudbuild.yaml` (Google Cloud Build) — caches `uv`
+  dependencies, pushes SHA-tagged image for deterministic
+  rollback, `:latest` exists only as the `--cache-from` source
+- **Deploy script**: `deploy/deploy.sh` (mode 0755) — idempotent
+  `gcloud run deploy` with env-var allowlist (`GEMINI_*`,
+  `GOOGLE_*`, `LUMI_*`, `OTEL_*`); strips
+  `GOOGLE_APPLICATION_CREDENTIALS` (Cloud Run uses the service
+  account identity)
+- **Resource defaults**: `--cpu=1 --memory=1Gi --cpu-boost
+  --min-instances=0 --max-instances=10 --timeout=300s`. Tuned for
+  demo traffic, not launch.
+- **Documentation**: `deploy/README.md` (prerequisites, one-time
+  setup, rollback procedure, log retrieval, cost note)
+
+See `deploy/README.md` for the full deployment runbook.
+
 ## What this stack does NOT include
 
 These were considered and rejected:
@@ -130,6 +155,10 @@ These were considered and rejected:
 - ❌ **LangGraph** — Lumi's pipeline is sequential (L1 → L2 → L3 → L4 →
   output), not a graph of branching state machines. ADK's
   `SequentialAgent` covers this cleanly.
+- ❌ **No CI/CD automation yet** — `deploy/deploy.sh` runs locally.
+  Cloud Build trigger wiring (push-to-master → auto-deploy) is
+  a Task 27 follow-up. For Kaggle submission, manual deploy from
+  the developer's machine is sufficient.
 
 ## How this stack maps to the Two-Layer L0–L5 model
 
@@ -152,3 +181,14 @@ This is the **handoff surface** — every row in Layer B either constrains
 what code Claude generates, or catches violations before they reach Layer
 A. The pre-commit hook is the literal "compile + test" gate between
 layers (cf. ARCHITECTURE.md §Two-Layer model).
+
+## Test & CI
+
+- **Tests**: 276 passing, 1 skipped (live Gemini gated on `GEMINI_API_KEY`)
+- **Pre-commit chain** (`.pre-commit-config.yaml`, 9 hooks):
+  - 5 upstream (`pre-commit-hooks` v5.0.0): `end-of-file-fixer`,
+    `trailing-whitespace`, `check-yaml`, `check-toml`,
+    `check-added-large-files` (max 1024 KB)
+  - 4 local: `ruff check`, `ruff format --check`, `semgrep` (custom
+    rules in `.semgrep/rules.yaml`), and `lumi_guard.py` (personal-info
+    + author-identity guard)
