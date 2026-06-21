@@ -48,30 +48,36 @@ class IdentityProfile(BaseModel):
             prompt-injection payloads (e.g. "age: 99999").
         location: ISO 3166-1 alpha-2 country code, an ISO 3166-2
             subdivision, or a city name. Free-form when the user
-            provides a city but not a country.
+            provides a city but not a country. Capped at 100 chars
+            (city/country names are short).
         education_level: Coarse-grained education stage. The LLM
             must choose the closest enum value or leave it None.
         languages: ISO 639-1 language codes (e.g. "en", "zh",
             "ja"). Empty list when no language is mentioned.
+            Capped at 20 entries (defense against DoS via
+            context overflow).
         interests: Lowercased topic tags (e.g. ["nlp",
             "computer_vision", "rl", "agents"]). No PII.
+            Capped at 20 entries (same DoS rationale).
         goals: Free-text goal statement — what the user wants to
             learn or build. Preserved verbatim from the model.
+            Capped at 500 chars.
         raw_query: The original user message, preserved so later
             layers can re-validate against the source of truth
-            (CONTEXT.md #12).
+            (CONTEXT.md #12). Required, 1..2000 chars (CONTEXT.md
+            #11 input-length cap, enforced at the schema layer).
         confidence: Extraction confidence in [0.0, 1.0]. The LLM
             is instructed to set this based on how many fields
             were extracted with high confidence.
     """
 
     age: int | None = Field(default=None, ge=5, le=120)
-    location: str | None = None
+    location: str | None = Field(default=None, max_length=100)
     education_level: EducationLevel | None = None
-    languages: list[str] = Field(default_factory=list)
-    interests: list[str] = Field(default_factory=list)
-    goals: str | None = None
-    raw_query: str
+    languages: list[str] = Field(default_factory=list, max_length=20)
+    interests: list[str] = Field(default_factory=list, max_length=20)
+    goals: str | None = Field(default=None, max_length=500)
+    raw_query: str = Field(min_length=1, max_length=2000)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
@@ -90,8 +96,8 @@ class EligibleResource(BaseModel):
     """
 
     resource: ResourceOutput
-    matched_constraints: list[str] = Field(default_factory=list)
-    rejected_constraints: list[str] = Field(default_factory=list)
+    matched_constraints: list[str] = Field(default_factory=list, max_length=20)
+    rejected_constraints: list[str] = Field(default_factory=list, max_length=20)
 
 
 class EligibilityResult(BaseModel):
@@ -105,9 +111,9 @@ class EligibilityResult(BaseModel):
     which filters were applied and why.
     """
 
-    eligible: list[EligibleResource] = Field(default_factory=list)
+    eligible: list[EligibleResource] = Field(default_factory=list, max_length=50)
     insufficient_data: bool = False
-    reasoning: str
+    reasoning: str = Field(max_length=1000)
 
 
 # ─── L3 Level Filter output ────────────────────────────────────────────
@@ -163,9 +169,9 @@ class LevelFilterResult(BaseModel):
             surface to the user when the match set is empty.
     """
 
-    matches: list[LevelMatch] = Field(default_factory=list)
+    matches: list[LevelMatch] = Field(default_factory=list, max_length=50)
     user_level: SkillLevel | None = None
-    reasoning: str = ""
+    reasoning: str = Field(default="", max_length=1000)
 
 
 # ─── L4 Timeline output ────────────────────────────────────────────────
@@ -192,13 +198,19 @@ class TimelineEntry(BaseModel):
     Combines the original catalog record with L4's annotations:
     deadline proximity, freshness signal, and a recommended action
     for the user.
+
+    Field bounds close DoS surfaces flagged by the prompt-injection
+    test suite (Task 41-44): ``days_until_deadline`` is bounded to
+    +/- 10 years, ``freshness_signal`` and ``recommended_action`` are
+    short single-line strings, and ``resource`` is the catalog entry
+    (bounded upstream by its own schema).
     """
 
     resource: ResourceOutput
     urgency: Urgency
-    days_until_deadline: int | None = None
-    freshness_signal: str
-    recommended_action: str
+    days_until_deadline: int | None = Field(default=None, ge=-3650, le=3650)
+    freshness_signal: str = Field(min_length=1, max_length=50)
+    recommended_action: str = Field(min_length=1, max_length=200)
 
 
 class TimelineResult(BaseModel):
@@ -206,11 +218,13 @@ class TimelineResult(BaseModel):
 
     The orchestrator (Task 25) reads this as the final pipeline
     payload and feeds it into the parallel output-ranking stage.
+    ``ranked`` is capped at 50 entries to bound the parallel output
+    stage's memory and latency.
     """
 
-    ranked: list[TimelineEntry] = Field(default_factory=list)
+    ranked: list[TimelineEntry] = Field(default_factory=list, max_length=50)
     today: date = Field(default_factory=date.today)
-    reasoning: str = ""
+    reasoning: str = Field(default="", max_length=1000)
 
 
 # ─── Heuristics for code-side urgency classification ────────────────────

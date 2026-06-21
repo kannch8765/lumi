@@ -38,18 +38,23 @@ class ResourceOutput(BaseModel):
 
     All optional fields default to safe empty values so callers always
     receive a complete record even when the catalog entry omits them.
+
+    Field caps close DoS surfaces flagged by the L4 prompt-injection
+    suite: a malicious catalog entry (or a jailbroken LLM forging one)
+    cannot inject megabyte-sized strings or unbounded lists into the
+    pipeline.
     """
 
-    id: str
-    name: str
-    type: str
-    url: str
-    level: str | None = None
-    language: str | None = None
-    prerequisites: list[str] = Field(default_factory=list)
-    geo_restrictions: list[str] = Field(default_factory=list)
-    age_requirement: int | None = None
-    institution_requirement: str | None = None
-    last_verified_free: str | None = None
-    tags: list[str] = Field(default_factory=list)
-    description: str
+    id: str = Field(min_length=1, max_length=100)
+    name: str = Field(min_length=1, max_length=200)
+    type: str = Field(min_length=1, max_length=50)
+    url: str = Field(min_length=1, max_length=500)
+    level: str | None = Field(default=None, max_length=50)
+    language: str | None = Field(default=None, max_length=10)
+    prerequisites: list[str] = Field(default_factory=list, max_length=50)
+    geo_restrictions: list[str] = Field(default_factory=list, max_length=50)
+    age_requirement: int | None = Field(default=None, ge=0, le=120)
+    institution_requirement: str | None = Field(default=None, max_length=200)
+    last_verified_free: str | None = Field(default=None, max_length=50)
+    tags: list[str] = Field(default_factory=list, max_length=50)
+    description: str = Field(min_length=1, max_length=2000)

@@ -119,7 +119,7 @@ def test_level_match_fit_score_bounds() -> None:
         name="X",
         type="course",
         url="https://example.com/x",
-        description="",
+        description="sample",
     )
 
     # Within bounds — accepted.

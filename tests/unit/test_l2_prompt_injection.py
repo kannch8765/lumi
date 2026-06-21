@@ -227,37 +227,31 @@ def test_eligibility_result_rejects_non_list_eligible() -> None:
         EligibilityResult(eligible="all 50 resources", reasoning="r")  # type: ignore[arg-type]
 
 
-def test_eligibility_result_reasoning_unbounded_length_is_dos_gap() -> None:
-    """§T.* / §D.1 — DESIGN GAP: ``reasoning`` has no max_length validator.
+def test_eligibility_result_reasoning_rejects_megabyte_payload() -> None:
+    """§T.* / §D.1 — ``reasoning`` is capped at 1000 chars (closes DoS gap).
 
     A pathological LLM (or attacker who has compromised the LLM call)
-    could emit megabytes of text here. The schema accepts it; downstream
-    consumers must enforce their own cap. Flag as a finding — do not
-    silently add a validator without the threat-model update.
+    could previously emit megabytes of text here. The schema now
+    rejects oversized payloads at the validation boundary.
     """
     huge = "A" * (1 * 1024 * 1024)  # 1 MB
-    # The schema currently accepts this — record the observation.
-    result = EligibilityResult(eligible=[], reasoning=huge)
-    assert len(result.reasoning) == 1 * 1024 * 1024
-    # The schema does not enforce a max_length — this is the gap.
-    # If a future commit adds max_length, this assertion will fail and
-    # the gap closes; update the test then.
+    with pytest.raises(ValidationError):
+        EligibilityResult(eligible=[], reasoning=huge)
 
 
-def test_eligibility_result_eligible_list_unbounded_length_is_dos_gap() -> None:
-    """§D.1 — DESIGN GAP: ``EligibilityResult.eligible`` has no max_length
-    validator. 10_000 entries pass schema validation, which is a DoS
-    surface for any downstream consumer that materialises the list.
+def test_eligibility_result_eligible_list_rejects_mega_list() -> None:
+    """§D.1 — ``eligible`` is capped at 50 entries (closes DoS gap).
 
-    Same handling as the reasoning gap — observe, don't silently fix.
+    10_000 entries previously passed schema validation; the schema now
+    rejects oversized lists at the validation boundary.
     """
     resource = _sample_resource()
     huge_list = [
         EligibleResource(resource=resource, matched_constraints=["age"])
         for _ in range(10_000)
     ]
-    result = EligibilityResult(eligible=huge_list, reasoning="flood")
-    assert len(result.eligible) == 10_000
+    with pytest.raises(ValidationError):
+        EligibilityResult(eligible=huge_list, reasoning="flood")
 
 
 # ── Identity pollution (threat L1.S.1, L2.T.1) ─────────────────────────

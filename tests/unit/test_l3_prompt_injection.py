@@ -285,12 +285,11 @@ def test_matches_empty_list_valid() -> None:
     assert result.matches == []
 
 
-def test_matches_list_unbounded_design_gap() -> None:
-    """DESIGN GAP: LevelFilterResult.matches has no max_length.
+def test_matches_list_rejects_mega_list() -> None:
+    """LevelFilterResult.matches is capped at 50 entries (closes DoS gap).
 
-    Pydantic accepts arbitrarily large lists. A runaway L3 pass could
-    emit 10k entries and balloon L4's working set. There is currently
-    no schema-level guard — L4 must enforce its own ceiling.
+    A runaway L3 pass could previously emit 10k entries and balloon L4's
+    working set. The schema now rejects oversized lists.
     """
 
     resources = [
@@ -304,12 +303,25 @@ def test_matches_list_unbounded_design_gap() -> None:
         )
         for r in resources
     ]
-    # Schema accepts 10k entries — flag the gap, do not silently fix.
+    with pytest.raises(ValidationError):
+        LevelFilterResult(matches=matches, user_level=SkillLevel.INTERMEDIATE)
+
+
+def test_matches_list_accepts_at_cap() -> None:
+    """LevelFilterResult.matches accepts exactly 50 entries (boundary)."""
+    resources = [
+        _sample_resource(resource_id=f"r-{i:05d}", name=f"R{i}") for i in range(50)
+    ]
+    matches = [
+        LevelMatch(
+            resource=r,
+            matched_level=SkillLevel.INTERMEDIATE,
+            fit_score=0.5,
+        )
+        for r in resources
+    ]
     result = LevelFilterResult(matches=matches, user_level=SkillLevel.INTERMEDIATE)
-    assert len(result.matches) == 10_000, (
-        "If this ever fails with ValidationError, the schema gained a "
-        "max_length — update this test to reflect the new contract."
-    )
+    assert len(result.matches) == 50
 
 
 def test_matches_does_not_dedupe() -> None:

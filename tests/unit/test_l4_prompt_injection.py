@@ -519,26 +519,33 @@ def test_crafted_input_cannot_mark_stale_resource_as_critical() -> None:
 # ── 4. Deadline injection ─────────────────────────────────────────────
 
 
-def test_days_until_deadline_accepts_99999_but_flags() -> None:
-    """`days_until_deadline=99999` is schema-valid (no upper bound).
+def test_days_until_deadline_rejects_99999() -> None:
+    """`days_until_deadline=99999` is rejected by the schema cap (le=3650).
 
-    This is a design finding: a 27,000-year deadline is a sign of
-    LLM hallucination or injection (threat L4.R.1). The schema
-    should add a `le=3650` cap; until it does, the test documents
-    the gap so it cannot regress silently.
+    Threat L4.R.1: a 27,000-year deadline is a sign of LLM
+    hallucination or injection. The schema now caps the field at
+    +/- 10 years.
     """
+    with pytest.raises(ValidationError):
+        TimelineEntry(
+            resource=_sample_resource(),
+            urgency=Urgency.LOW,
+            days_until_deadline=99999,
+            freshness_signal="fresh",
+            recommended_action="Bookmark",
+        )
+
+
+def test_days_until_deadline_accepts_at_cap() -> None:
+    """`days_until_deadline=3650` is accepted (boundary inclusion)."""
     entry = TimelineEntry(
         resource=_sample_resource(),
         urgency=Urgency.LOW,
-        days_until_deadline=99999,
+        days_until_deadline=3650,
         freshness_signal="fresh",
         recommended_action="Bookmark",
     )
-    assert entry.days_until_deadline == 99999
-    # Document the gap: the classify heuristic maps 99999 to LOW
-    # (beyond 90 days), so the output is at least correct, but the
-    # schema does not cap the input. TODO: add `Field(le=3650)`.
-    assert classify_days_until_deadline(99999) is Urgency.LOW
+    assert entry.days_until_deadline == 3650
 
 
 def test_days_until_deadline_negative_past_returns_critical() -> None:
@@ -571,13 +578,11 @@ def test_empty_ranked_list_is_valid() -> None:
     assert result.reasoning == "no L3 matches"
 
 
-def test_massive_ranked_list_is_accepted() -> None:
-    """100,000 entries is schema-valid; the schema has no `max_length`.
+def test_massive_ranked_list_rejected() -> None:
+    """100,000 entries is rejected (closes DoS via context overflow).
 
-    Design gap: an LLM could be tricked into emitting a giant
-    TimelineResult (DoS via context overflow). The Pydantic model
-    should add `Field(max_length=100)`; until it does, this test
-    documents the gap.
+    An LLM could previously be tricked into emitting a giant
+    TimelineResult. The Pydantic model now caps `ranked` at 50.
     """
     resource = _sample_resource()
     huge = [
@@ -589,8 +594,24 @@ def test_massive_ranked_list_is_accepted() -> None:
         )
         for _ in range(100_000)
     ]
-    result = TimelineResult(ranked=huge)
-    assert len(result.ranked) == 100_000  # accepted without truncation
+    with pytest.raises(ValidationError):
+        TimelineResult(ranked=huge)
+
+
+def test_ranked_list_accepts_at_cap() -> None:
+    """`ranked` accepts exactly 50 entries (boundary inclusion)."""
+    resource = _sample_resource()
+    at_cap = [
+        TimelineEntry(
+            resource=resource,
+            urgency=Urgency.LOW,
+            freshness_signal="unverified",
+            recommended_action="x",
+        )
+        for _ in range(50)
+    ]
+    result = TimelineResult(ranked=at_cap)
+    assert len(result.ranked) == 50
 
 
 def test_duplicate_resources_with_different_urgencies_not_deduped() -> None:
@@ -639,38 +660,35 @@ def test_freshness_signal_uppercase_is_accepted() -> None:
     assert entry.freshness_signal == "VERIFIED"
 
 
-def test_freshness_signal_empty_string_accepted() -> None:
-    """`freshness_signal=''` is accepted (no min_length constraint).
+def test_freshness_signal_empty_string_rejected() -> None:
+    """`freshness_signal=''` is rejected (closes min_length=1 gap).
 
-    Design gap: a Pydantic `min_length=1` would make this a
-    ValidationError. The instruction says freshness_signal must be
-    one of four values, but the schema is permissive.
+    The instruction says freshness_signal must be one of four values,
+    so the schema now enforces `min_length=1`.
     """
-    entry = TimelineEntry(
-        resource=_sample_resource(),
-        urgency=Urgency.HIGH,
-        freshness_signal="",
-        recommended_action="act",
-    )
-    assert entry.freshness_signal == ""
+    with pytest.raises(ValidationError):
+        TimelineEntry(
+            resource=_sample_resource(),
+            urgency=Urgency.HIGH,
+            freshness_signal="",
+            recommended_action="act",
+        )
 
 
-def test_freshness_signal_very_long_string_accepted() -> None:
-    """A 10,000-char freshness_signal is accepted.
+def test_freshness_signal_very_long_string_rejected() -> None:
+    """A 10,000-char freshness_signal is rejected (closes max_length gap).
 
-    Design gap: no `max_length`. A prompt-injection snippet could
-    smuggle a long payload into the field. The CONTEXT.md #11
-    length cap (10 KB/result) is enforced at the MCP layer, not the
-    L4 schema.
+    A prompt-injection snippet could previously smuggle a long payload
+    into the field. The schema now caps freshness_signal at 50 chars.
     """
     long_signal = "x" * 10_000
-    entry = TimelineEntry(
-        resource=_sample_resource(),
-        urgency=Urgency.HIGH,
-        freshness_signal=long_signal,
-        recommended_action="act",
-    )
-    assert len(entry.freshness_signal) == 10_000
+    with pytest.raises(ValidationError):
+        TimelineEntry(
+            resource=_sample_resource(),
+            urgency=Urgency.HIGH,
+            freshness_signal=long_signal,
+            recommended_action="act",
+        )
 
 
 # ── 7. Recommended-action injection ───────────────────────────────────
@@ -702,15 +720,19 @@ def test_recommended_action_with_injection_string_is_accepted_as_data() -> None:
     )
 
 
-def test_recommended_action_empty_string_accepted() -> None:
-    """`recommended_action=''` is accepted (no min_length)."""
-    entry = TimelineEntry(
-        resource=_sample_resource(),
-        urgency=Urgency.HIGH,
-        freshness_signal="fresh",
-        recommended_action="",
-    )
-    assert entry.recommended_action == ""
+def test_recommended_action_empty_string_rejected() -> None:
+    """`recommended_action=''` is rejected (closes min_length=1 gap).
+
+    The L4 instruction requires a non-empty recommended_action so the
+    user always sees something actionable.
+    """
+    with pytest.raises(ValidationError):
+        TimelineEntry(
+            resource=_sample_resource(),
+            urgency=Urgency.HIGH,
+            freshness_signal="fresh",
+            recommended_action="",
+        )
 
 
 # ── 8. LevelFilterResult pollution (L4's input) ───────────────────────

@@ -314,18 +314,22 @@ def test_unicode_rtl_override_in_raw_query_passes_schema() -> None:
     assert "‮" in profile.raw_query
 
 
-def test_zero_width_space_flood_does_not_break_schema() -> None:
-    """A 10k-character zero-width-space flood (``​``)
-    round-trips through the schema (threat L1.D.1 long-context
-    overflow, ARCHITECTURE.md §Injection test patterns).
+def test_zero_width_space_flood_rejected() -> None:
+    """A 10k-character zero-width-space flood is rejected (closes DoS gap).
 
-    The schema does not bound ``raw_query`` length — that is the
-    L0 input-length cap (CONTEXT.md #11 — 10 KB/result).
-    Documenting the gap here so it is visible.
+    Threat L1.D.1 long-context overflow: ``raw_query`` is now capped at
+    2000 chars (CONTEXT.md #11 — input-length cap, enforced at the
+    schema layer rather than the L0 layer).
     """
     flood = "​" * 10_000
-    profile = IdentityProfile(raw_query=flood)
-    assert len(profile.raw_query) == 10_000
+    with pytest.raises(ValidationError):
+        IdentityProfile(raw_query=flood)
+
+
+def test_raw_query_accepts_at_cap() -> None:
+    """``raw_query`` accepts exactly 2000 chars (boundary inclusion)."""
+    profile = IdentityProfile(raw_query="a" * 2000)
+    assert len(profile.raw_query) == 2000
 
 
 # ── PI.10: JSON injection / tool-call-shaped payloads ──────────────────
