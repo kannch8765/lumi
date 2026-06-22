@@ -27,7 +27,16 @@ timeout: 600s
 # `latest` tag as a cache source so Docker can reuse unchanged layers.
 options:
   logging: CLOUD_LOGGING_ONLY
-  machineType: E2_HIGHCPU_8
+  # GOTCHA (Task 27b, 2026-06-22): explicit `machineType: E2_HIGHCPU_8`
+  # exceeds the trial-account default Cloud Build quota. Symptom at
+  # submit: "FAILED_PRECONDITION: ... Cloud Build cannot run builds of
+  # this machine type in this region, please contact Google Cloud
+  # Support". Fix: leave machineType unset; Cloud Build uses the
+  # default (E2_HIGHCPU_2 on trial, ~2 vCPU / 2 GB RAM), which is
+  # sufficient for `uv sync` + `docker build` of the Lumi image
+  # (~700 MiB of source). The build is CPU-bound on `uv sync` and on
+  # layer cache lookup, not on parallel build fan-out, so the larger
+  # 8-vCPU machine wouldn't help much anyway.
 
 substitutions:
   _REGION: us-central1
