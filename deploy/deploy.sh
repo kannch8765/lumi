@@ -90,7 +90,17 @@ fi
 #                              before opening to the public internet.
 #   --cpu-boost                Reduces cold-start latency for the demo.
 #   --min-instances=0          Scales to zero (free tier friendly).
-#   --max-instances=10         Demo cap; tune before launch.
+#   --max-instances            Caps runaway scaling (cost guardrail).
+#                              Override via MAX_INSTANCES env var.
+#                              Default 1 for the test-deploy path (Task
+#                              27); bump up only if real traffic needs it.
+#   --concurrency              One request per instance during test
+#                              (avoids pipeline-state interleaving).
+#                              Override via CONCURRENCY env var.
+#   --memory=1Gi / --cpu=1     Fits all 5 agents comfortably (Task 45
+#                              E2E baseline observed ~700 MiB peak).
+MAX_INSTANCES="${MAX_INSTANCES:-1}"
+CONCURRENCY="${CONCURRENCY:-1}"
 DEPLOY_ARGS=(
   run deploy "${SERVICE_NAME}"
   --project="${PROJECT_ID}"
@@ -100,7 +110,8 @@ DEPLOY_ARGS=(
   --allow-unauthenticated
   --cpu-boost
   --min-instances=0
-  --max-instances=10
+  --max-instances="${MAX_INSTANCES}"
+  --concurrency="${CONCURRENCY}"
   --port=8080
   --timeout=300
   --memory=1Gi
