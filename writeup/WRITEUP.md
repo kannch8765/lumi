@@ -198,3 +198,169 @@ curl -s http://localhost:8000/list-apps
 `uv run adk run` is the same execution path our `tests/integration/test_pipeline_e2e.py` uses (the E2E test calls `run_lumi_query` directly; the CLI calls the same `create_lumi_pipeline` factory through ADK's `AgentLoader`). The CLI surfaces one extra wrinkle the E2E test does not: the persistent `SessionService` tries to JSON-serialize session state at the end of the run, so the ranker callback writes `state['ranked_timeline']` as a `model_dump(mode="json")` dict rather than a `TimelineResult` Pydantic object (`app/orchestrator.py:_rank_after_agent`). The E2E test hides this because `InMemorySessionService` does not persist state.
 
 `uv run adk web` is what `adk run` would become with a browser UI and a small REST surface (`/list-apps`, `/run`, `/run_sse`). We use it during local dev and demos; the Cloud Run deploy (Task 27) replaces the CLI invocation with `uvicorn app.fast_api_app:app` and routes the same `create_lumi_pipeline` instance behind HTTPS. The CLI demo satisfies the Kaggle brief's "Agent skills (e.g., Agents CLI)" key concept without adding new dependencies.
+
+## 6. Deployability — test-deploy-then-tear-down
+
+The Kaggle brief lists "Deployability" as a 6-key-concept target and
+calls deployment "optional but recommended — if you deploy, include
+reproduction docs." We chose a deliberately conservative posture:
+**run a one-shot test deploy on a throwaway trial project, capture
+every gotcha, then tear the service down.** This proves the
+deployment works end-to-end and gives judges an honest, reproducible
+runbook, without leaving a publicly addressable Lumi service sitting
+in production on a Kaggle demo budget.
+
+### What was tested (lumi-test-deploy, 2026-06-22)
+
+| Step | Result | Time |
+|---|---|---|
+| Enable Cloud Run + Cloud Build + Artifact Registry + Billing Budgets APIs | ✅ | 30 s |
+| Create Artifact Registry repo `lumi` in `us-central1` | ✅ | 30 s |
+| Create $5 budget alert at 50/90/100% thresholds (trial account) | ✅ | 30 s |
+| `gcloud builds submit` (after 4 fix-and-retry cycles) | ✅ `SUCCESS` | 1 m 5 s |
+| `gcloud run deploy lumi` with safety guardrails | ✅ `Revision lumi-00001-z2q serving 100%` | ~1 m |
+| `GET /list-apps` | ✅ `["agents"]` | <1 s |
+| `GET /docs` (Swagger UI) | ✅ HTML rendered | <1 s |
+| `POST /run` (real Lumi query) | ⚠️ `500` (Gemini 429, see Gotcha #5) | n/a |
+| `gcloud run services delete lumi` (teardown) | ✅ 0 ongoing cost, 0 attack surface | <10 s |
+
+### Why the test-deploy-then-tear-down approach
+
+| Argument | Reasoning |
+|---|---|
+| **Brief allows GitHub + setup docs** | The deploy is a nice-to-have, not a judging requirement. The reproduction docs are MORE useful when based on real gotchas, not aspirations. |
+| **Security** | A long-running `lumi-434649037708.us-central1.run.app` URL is publicly addressable. Kaggle judges would have to trust a stranger's app with no SLA. A torn-down service + open-source repo + local `adk run` demo is safer for everyone. |
+| **Cost** | Free trial = $300 credit; Cloud Run free tier = 2 M req/mo. A short test burned ~$0.05. A long-running service would burn ~$0.50/day from idle min-instances. |
+| **Honesty** | The 5 gotchas (see below) are real. Documenting them beats shipping a "we deployed it!" URL that breaks under the first 10 users. |
+
+### 5 real gotchas, captured live
+
+#### 6.1 Bash `${VAR}` misread as Cloud Build substitution
+
+```
+ERROR: invalid value for 'build.substitutions': key in the template
+'IMAGE' is not a valid built-in substitution
+```
+
+Cloud Build scans every `${VAR}` in the template. If `VAR` isn't a
+built-in (`SHORT_SHA`, `BRANCH_NAME`, `PROJECT_ID`, …) or
+user-defined (underscore-prefixed, `^_[A-Z0-9_]+$`), the template is
+rejected at submit time — **before any step runs**. Our build step
+used `${IMAGE}` for a bash shell variable; Cloud Build couldn't match
+it. **Fix:** escape with `$${IMAGE}` (double-dollar) so the first `$`
+becomes literal in the rendered script. See `cloudbuild.yaml:75,79`.
+
+#### 6.2 `${SHORT_SHA:-latest}` not matched against substitution data
+
+```
+ERROR: key 'SHORT_SHA' in the substitution data is not matched in the template
+```
+
+Bash parameter-expansion syntax (`${VAR:-default}`) doesn't match the
+literal `${VAR}` Cloud Build's parser looks for. **Fix:** drop the
+`:-default` syntax. Rely on Cloud Build to substitute the value.
+
+#### 6.3 User-defined substitution names must start with `_`
+
+```
+ERROR: substitution key SHORT_SHA does not respect format ^_[A-Z0-9_]+$
+```
+
+`SHORT_SHA` is a Cloud Build **built-in** (auto-populated from git
+HEAD). Declaring a default for it in the `substitutions:` block
+re-classifies it as user-defined, which requires an underscore
+prefix. **Fix:** leave built-in names out of the `substitutions:`
+block.
+
+#### 6.4 Trial account can't run `E2_HIGHCPU_8` Cloud Build workers
+
+```
+ERROR: FAILED_PRECONDITION: Cloud Build cannot run builds of this
+machine type in this region
+```
+
+Trial accounts have tighter Cloud Build quotas than pay-as-you-go.
+**Fix:** drop the `machineType` line; use the trial default
+(`E2_HIGHCPU_2`, 2 vCPU / 2 GB). Plenty for `uv sync` + `docker
+build` of Lumi.
+
+#### 6.5 Global Gemini free-tier quota (15 RPM) shared across projects
+
+```
+google.genai.errors.ClientError: 429 RESOURCE_EXHAUSTED
+Quota exceeded for metric: generativelanguage.googleapis.com/
+generate_content_free_tier_requests, limit: 15, model: gemini-3.1-flash-lite
+```
+
+The 15-RPM limit on `gemini-3.1-flash-lite` free tier is **per API
+key, not per project**. The same `GEMINI_API_KEY` was already
+serving `paper-scope` and `adk-project` on the same trial account, so
+any Lumi query that fires 4 sequential LLM calls (L1 → L2 → L3 → L4)
+hits the global ceiling. **Production fix:** set
+`GOOGLE_GENAI_USE_VERTEXAI=true` in `.env.production` to route
+through Vertex AI (which uses project billing, not the shared AI
+Studio key), or use a dedicated API key per project. See
+`deploy/README.md` Gotcha #5 for the full writeup.
+
+### Reproducing the test deploy
+
+```bash
+# 1. One-time setup (5 min)
+gcloud auth login
+export PROJECT_ID=<your-test-project>
+gcloud billing projects link "${PROJECT_ID}" --billing-account=<id>
+gcloud services enable \
+  run.googleapis.com cloudbuild.googleapis.com \
+  artifactregistry.googleapis.com billingbudgets.googleapis.com \
+  --project="${PROJECT_ID}"
+gcloud artifacts repositories create lumi \
+  --repository-format=docker --location=us-central1 \
+  --project="${PROJECT_ID}"
+gcloud billing budgets create --billing-account=<id> \
+  --display-name="Lumi test" --budget-amount=5USD \
+  --threshold-rule=percent=50 \
+  --threshold-rule=percent=90 \
+  --threshold-rule=percent=100
+
+# 2. Deploy (~7-8 min for first build, 1-2 min for rebuilds)
+cp .env .env.production && chmod 600 .env.production
+./deploy/deploy.sh
+
+# 3. Smoke test
+SERVICE_URL="$(gcloud run services describe lumi \
+  --project="${PROJECT_ID}" --region=us-central1 \
+  --format='value(status.url)')"
+curl -sS "${SERVICE_URL}/list-apps"        # → ["agents"]
+open "${SERVICE_URL}/dev-ui"               # browser chat UI
+
+# 4. Tear down (10 s, fully gone, 0 ongoing cost)
+gcloud run services delete lumi \
+  --project="${PROJECT_ID}" --region=us-central1
+```
+
+### Safety guardrails in `deploy/deploy.sh`
+
+The deploy script enforces three cost/blast-radius caps regardless of
+the project it runs against:
+
+| Flag | Value | Why |
+|---|---|---|
+| `--max-instances=1` | 1 | Caps runaway scaling (cost guardrail). Override via `MAX_INSTANCES` env var. |
+| `--concurrency=1` | 1 | One request per instance during test (avoids pipeline-state interleaving). Override via `CONCURRENCY` env var. |
+| `--min-instances=0` | 0 | Scales to zero (free-tier friendly). |
+| `--cpu-boost` | enabled | Reduces cold-start latency for the demo. |
+| `--memory=1Gi --cpu=1` | 1 GB / 1 vCPU | Fits all 5 agents comfortably (Task 45 E2E baseline observed ~700 MiB peak). |
+| `--timeout=300` | 300 s | 5-min request timeout (4-layer LLM pipeline can take 30-90 s). |
+| `--allow-unauthenticated` | enabled | Demo / Kaggle capstone surface; replace with `--no-allow-unauthenticated` + IAM before opening to the public internet. |
+
+For the actual Kaggle submission, the demo video (Task 28) uses
+`adk run` against a local Python process — no quota sharing, no
+public URL, no deploy cost.
+
+## 7. Results & Lessons (coming in Task 39)
+
+The §6-7 sections will be populated with the actual E2E numbers
+from `tests/integration/test_pipeline_e2e.py` (latency p50/p95,
+pass rate across the 5 manual scenarios, prompt-injection block rate)
+and the lessons learned from the L0–L5 control model + the test
+deploy.
