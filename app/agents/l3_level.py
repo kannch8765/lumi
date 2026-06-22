@@ -23,6 +23,7 @@ SECURITY MODEL
 from __future__ import annotations
 
 import sys
+from typing import Any
 
 from google.adk.agents import LlmAgent
 from google.adk.models.google_llm import Gemini
@@ -120,7 +121,11 @@ def _build_resource_catalog_toolset() -> McpToolset:
     )
 
 
-def create_l3_level_agent(model: str = DEFAULT_L3_MODEL) -> LlmAgent:
+def create_l3_level_agent(
+    model: str = DEFAULT_L3_MODEL,
+    *,
+    before_agent_callback: Any | None = None,
+) -> LlmAgent:
     """Factory for the L3 Level Filter Agent.
 
     Reads the user's identity (session state ``identity``) and the L2
@@ -138,6 +143,11 @@ def create_l3_level_agent(model: str = DEFAULT_L3_MODEL) -> LlmAgent:
         model: Gemini model name. Defaults to ``gemini-3.1-flash-lite``
             (low-latency, low-cost model suitable for structured
             classification on a bounded set).
+        before_agent_callback: Optional ADK ``before_agent_callback``.
+            When provided (typically by ``app.orchestrator``), the
+            orchestrator can skip L3 in O(0 LLM calls) when L1's
+            routing decision excludes it (e.g. ``intent=freshness_check``
+            or ``intent=out_of_scope``). When None, L3 always runs.
     """
 
     tools = [_build_resource_catalog_toolset()]
@@ -149,4 +159,5 @@ def create_l3_level_agent(model: str = DEFAULT_L3_MODEL) -> LlmAgent:
         tools=tools,
         output_schema=LevelFilterResult,
         output_key="level_filter",
+        before_agent_callback=before_agent_callback,
     )

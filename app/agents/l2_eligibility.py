@@ -35,6 +35,7 @@ switch per CONTEXT.md #10).
 from __future__ import annotations
 
 import sys
+from typing import Any
 
 from google.adk.agents import LlmAgent
 from google.adk.models import Gemini
@@ -138,7 +139,11 @@ def _build_resource_catalog_toolset() -> McpToolset:
     )
 
 
-def create_l2_eligibility_agent(model: str = DEFAULT_L2_MODEL) -> LlmAgent:
+def create_l2_eligibility_agent(
+    model: str = DEFAULT_L2_MODEL,
+    *,
+    before_agent_callback: Any | None = None,
+) -> LlmAgent:
     """Factory for the L2 Eligibility Agent.
 
     Returns an ADK :class:`LlmAgent` that:
@@ -160,6 +165,11 @@ def create_l2_eligibility_agent(model: str = DEFAULT_L2_MODEL) -> LlmAgent:
             (low-latency, low-cost model suitable for catalog
             filtering). Override only for testing or for routing L2
             to a different model tier.
+        before_agent_callback: Optional ADK ``before_agent_callback``.
+            When provided (typically by ``app.orchestrator``), the
+            orchestrator can skip L2 in O(0 LLM calls) when L1's
+            routing decision excludes it (e.g. ``intent=filter_only``
+            or ``intent=out_of_scope``). When None, L2 always runs.
     """
     tools = [_build_resource_catalog_toolset()]
 
@@ -170,4 +180,5 @@ def create_l2_eligibility_agent(model: str = DEFAULT_L2_MODEL) -> LlmAgent:
         tools=tools,
         output_schema=EligibilityResult,
         output_key="eligibility",
+        before_agent_callback=before_agent_callback,
     )

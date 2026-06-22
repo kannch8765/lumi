@@ -76,6 +76,22 @@ STATE_KEY_ELIGIBILITY = "eligibility"
 STATE_KEY_LEVEL_FILTER = "level_filter"
 STATE_KEY_TIMELINE = "timeline"
 STATE_KEY_RANKED_TIMELINE = "ranked_timeline"
+# Written by the ranker callback when L1 sets ``out_of_scope=True``.
+# Holds the user-facing apology string from the L1 router. When this
+# key is set, ``run_lumi_query`` returns the string verbatim and
+# ignores the timeline path — the ranker short-circuits the entire
+# downstream chain to a single LLM call (L1 only).
+STATE_KEY_FINAL_USER_RESPONSE = "final_user_response"
+
+# Fallback apology used only when L1 marks the query out_of_scope but
+# fails to populate the ``apology`` field. Kept here (not in the L1
+# prompt) so a malformed L1 output never causes the pipeline to crash
+# or return an empty user response.
+DEFAULT_OUT_OF_SCOPE_APOLOGY = (
+    "I'm Lumi, a guide for free AI/ML learning resources. "
+    "Your question looks outside that scope — try asking about AI, "
+    "ML, or learning resources and I'll be glad to help."
+)
 
 
 def _coerce_timeline(value: Any) -> TimelineResult | None:
@@ -111,7 +127,63 @@ def _coerce_timeline(value: Any) -> TimelineResult | None:
     return None
 
 
-def _build_ranker_agent() -> LlmAgent:
+def _make_should_i_run_callback(agent_name: str):
+    """Build a ``before_agent_callback`` that skips ``agent_name`` when
+    it is not listed in ``state['identity']['target_agents']``.
+
+    The skip mechanism is the structural implementation of L1's routing
+    decision (see :class:`app.agents.l1_identity._L1_INSTRUCTION` part B
+    and ``IdentityProfile.target_agents``). L1's intent + target_agents
+    are written to session state after L1 finishes; this callback reads
+    that state and, if the agent is not targeted, returns an empty
+    :class:`Content` so ADK's runner treats the sub-agent as a no-op
+    — zero LLM calls, zero MCP tool calls.
+
+    Args:
+        agent_name: The sub-agent's ``name=`` (must match one of the
+            values in ``IdentityProfile.target_agents``, e.g.
+            ``"l2_eligibility"``, ``"l3_level"``, ``"l4_timeline"``,
+            or ``"timeline_ranker"``).
+
+    Returns:
+        An async-compatible callable suitable for ADK
+        ``LlmAgent.before_agent_callback``. Returns ``None`` to let
+        the agent run normally, or an empty :class:`Content` to skip.
+    """
+
+    async def _before_agent(callback_context: Any) -> genai_types.Content | None:
+        state = getattr(callback_context, "state", None)
+        if state is None:
+            # No state — be conservative and run the agent. We don't
+            # want a missing state to silently bypass the pipeline.
+            return None
+        identity_raw = state.get(STATE_KEY_IDENTITY)
+        # L1 may not have written identity yet (e.g. very early abort).
+        # In that case, let the agent run — the worst case is the old
+        # always-run behavior, never a silent skip.
+        if not isinstance(identity_raw, dict):
+            return None
+        target_agents = identity_raw.get("target_agents")
+        if not isinstance(target_agents, list):
+            return None
+        if agent_name in target_agents:
+            return None  # run normally
+        # Skip: emit an empty Content so ADK treats the agent as done.
+        logger.debug(
+            "skipping %s: not in target_agents=%s (L1 intent=%s)",
+            agent_name,
+            target_agents,
+            identity_raw.get("intent"),
+        )
+        return genai_types.Content(role="model", parts=[])
+
+    return _before_agent
+
+
+def _build_ranker_agent(
+    *,
+    before_agent_callback: Any | None = None,
+) -> LlmAgent:
     """Build the final code-only ranking sub-agent.
 
     The ranker has no LLM call to make — its job is purely to run
@@ -133,6 +205,7 @@ def _build_ranker_agent() -> LlmAgent:
             "after_agent_callback. Do not emit any text."
         ),
         output_key=STATE_KEY_RANKED_TIMELINE,
+        before_agent_callback=before_agent_callback,
         after_agent_callback=_rank_after_agent,
     )
 
@@ -162,6 +235,28 @@ def _rank_after_agent(
     state = getattr(callback_context, "state", None)
     if state is None:
         logger.warning("ranker callback: no state on callback_context")
+        return genai_types.Content(role="model", parts=[])
+
+    # Out-of-scope short-circuit: when L1 marked the query as not about
+    # AI/ML learning, all downstream agents (L2/L3/L4) have already
+    # been skipped by their before_agent_callbacks. We surface L1's
+    # apology as the final response and skip the ranking step entirely,
+    # so the entire pipeline costs exactly 1 LLM call (L1).
+    identity_raw = state.get(STATE_KEY_IDENTITY)
+    if isinstance(identity_raw, dict) and identity_raw.get("out_of_scope"):
+        apology = identity_raw.get("apology")
+        # Defensive fallback: never let a missing apology collapse the
+        # pipeline to an empty user reply. The L1 prompt requires the
+        # field, but we don't want a schema bug to surface as silence.
+        if not isinstance(apology, str) or not apology.strip():
+            apology = DEFAULT_OUT_OF_SCOPE_APOLOGY
+        state[STATE_KEY_FINAL_USER_RESPONSE] = apology
+        logger.debug(
+            "ranker callback: out_of_scope short-circuit, "
+            "wrote %d-char apology to state['%s']",
+            len(apology),
+            STATE_KEY_FINAL_USER_RESPONSE,
+        )
         return genai_types.Content(role="model", parts=[])
 
     raw_timeline = _coerce_timeline(state.get(STATE_KEY_TIMELINE))
@@ -226,11 +321,25 @@ def create_lumi_pipeline(
         sub-agents in execution order: L1, L2, L3, L4, ranker.
     """
     sub_agents: list[LlmAgent] = [
+        # L1 always runs — it is the router, never skipped. Its
+        # output drives the target_agents list that the callbacks
+        # below check.
         create_l1_identity_agent(model=model),
-        create_l2_eligibility_agent(model=model),
-        create_l3_level_agent(model=model),
-        create_l4_timeline_agent(model=model),
-        _build_ranker_agent(),
+        create_l2_eligibility_agent(
+            model=model,
+            before_agent_callback=_make_should_i_run_callback("l2_eligibility"),
+        ),
+        create_l3_level_agent(
+            model=model,
+            before_agent_callback=_make_should_i_run_callback("l3_level"),
+        ),
+        create_l4_timeline_agent(
+            model=model,
+            before_agent_callback=_make_should_i_run_callback("l4_timeline"),
+        ),
+        _build_ranker_agent(
+            before_agent_callback=_make_should_i_run_callback("timeline_ranker"),
+        ),
     ]
     return SequentialAgent(
         name="lumi_pipeline",
@@ -238,13 +347,13 @@ def create_lumi_pipeline(
     )
 
 
-async def run_lumi_query(query: str) -> TimelineResult:
+async def run_lumi_query(query: str) -> TimelineResult | str:
     """Run a single query through the full Lumi pipeline.
 
     Convenience wrapper for the most common caller pattern: build
     the pipeline, build an in-memory session, hand the user's
-    ``query`` to the runner as the user-role message, then read the
-    final ranked :class:`TimelineResult` out of session state.
+    ``query`` to the runner as the user-role message, then read
+    the final response out of session state.
 
     The user's ``query`` is delivered to L1 as the conversation's
     user message — NOT as a tool parameter and NOT via session
@@ -256,10 +365,18 @@ async def run_lumi_query(query: str) -> TimelineResult:
             undergrad in Brazil, want to learn LLMs"``).
 
     Returns:
-        The final ranked :class:`TimelineResult`. If any layer
-        errored or the pipeline never wrote ``state['timeline']``,
-        an empty :class:`TimelineResult` is returned so callers
-        always receive a structured payload.
+        Either:
+        - A :class:`TimelineResult` (the normal ranked-recommendation
+          payload) when the query is about AI/ML learning, OR
+        - A ``str`` apology when L1 classified the query as
+          ``out_of_scope`` (e.g. "plan me a Tokyo trip"). In that
+          case every downstream agent was skipped and the pipeline
+          cost exactly 1 LLM call (L1 only).
+
+        If the in-scope path errored partway and never wrote
+        ``state['timeline']``, an empty :class:`TimelineResult` is
+        returned so in-scope callers always receive a structured
+        payload.
     """
     pipeline = create_lumi_pipeline()
     session_service = InMemorySessionService()
@@ -303,6 +420,15 @@ async def run_lumi_query(query: str) -> TimelineResult:
         session_id=session.id,
     )
     state = final_session.state if final_session is not None else {}
+
+    # Out-of-scope short-circuit (Task 63): the ranker callback writes
+    # ``state['final_user_response']`` when L1 marked the query as not
+    # about AI/ML learning. Return the apology string verbatim and
+    # skip the timeline-path below — keeps the contract narrow so
+    # callers can ``isinstance(result, str)`` to detect OOS replies.
+    final_response = state.get(STATE_KEY_FINAL_USER_RESPONSE)
+    if isinstance(final_response, str) and final_response.strip():
+        return final_response
 
     # Prefer the post-ranker output if the callback fired, otherwise
     # fall back to the L4 output so callers still get a structured

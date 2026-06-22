@@ -16,10 +16,29 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from app.mcp_servers.resource_catalog.schemas import ResourceOutput
+
+# ─── L1 router intent types ────────────────────────────────────────────
+
+# Names of the L-layer agents in the pipeline. Used as values for
+# IdentityProfile.target_agents. Keep in sync with app/orchestrator.py.
+_LUMI_AGENT_NAMES = ("l2_eligibility", "l3_level", "l4_timeline", "timeline_ranker")
+
+# The 5 routing intents L1 can emit. Each intent maps to a specific
+# target_agents list (see IdentityProfile.target_agents default_factory).
+# See app/agents/l1_identity.py:_L1_INSTRUCTION for the full classification
+# rules + examples for each intent.
+LumiIntent = Literal[
+    "full_pipeline",  # Initial query: L1 → L2 → L3 → L4 → ranker
+    "filter_only",  # Follow-up: re-filter existing eligibility results
+    "freshness_check",  # Follow-up: re-check last_verified_free on existing picks
+    "drill_down",  # Follow-up: details on one specific resource
+    "out_of_scope",  # Not about AI/ML learning → apology + 0 sub-agents
+]
 
 
 class EducationLevel(StrEnum):
@@ -69,6 +88,29 @@ class IdentityProfile(BaseModel):
         confidence: Extraction confidence in [0.0, 1.0]. The LLM
             is instructed to set this based on how many fields
             were extracted with high confidence.
+        intent: Routing decision made by L1. One of the five
+            :data:`LumiIntent` values. Drives which downstream
+            sub-agents run (full_pipeline / filter_only /
+            freshness_check / drill_down / out_of_scope).
+            Default "full_pipeline" preserves the original
+            behavior (L2 → L3 → L4 → ranker all run) when the
+            router fields are not explicitly set, e.g. in tests
+            that don't exercise routing.
+        target_agents: Names of sub-agents that should actually
+            run, derived from `intent`. Each sub-agent's
+            `before_agent_callback` checks this list and skips
+            itself (returns an empty Content, 0 LLM call) if
+            not present. Default = all 4 downstream agents.
+            L1 always runs (it is the router, never skipped).
+        out_of_scope: True when the query is NOT about AI/ML
+            learning. The orchestrator's ranker callback reads
+            this and writes `final_user_response` = `apology`
+            instead of running the rank, short-circuiting the
+            entire pipeline to 1 LLM call (L1 only).
+        apology: User-facing reply when `out_of_scope=True`.
+            Should be 1-2 sentences, in the user's language,
+            explaining Lumi's scope. The ranker callback copies
+            this verbatim into `state['final_user_response']`.
     """
 
     age: int | None = Field(default=None, ge=5, le=120)
@@ -79,6 +121,10 @@ class IdentityProfile(BaseModel):
     goals: str | None = Field(default=None, max_length=500)
     raw_query: str = Field(min_length=1, max_length=2000)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    intent: LumiIntent = "full_pipeline"
+    target_agents: list[str] = Field(default_factory=lambda: list(_LUMI_AGENT_NAMES))
+    out_of_scope: bool = False
+    apology: str | None = Field(default=None, max_length=500)
 
 
 # ─── L2 Eligibility output ─────────────────────────────────────────────

@@ -25,6 +25,7 @@ SECURITY MODEL
 from __future__ import annotations
 
 import sys
+from typing import Any
 
 from google.adk.agents import LlmAgent
 from google.adk.models.google_llm import Gemini
@@ -152,7 +153,11 @@ def _build_all_mcp_tools() -> list[McpToolset]:
     return [_build_resource_catalog_toolset(), _build_web_search_toolset()]
 
 
-def create_l4_timeline_agent(model: str = "gemini-3.1-flash-lite") -> LlmAgent:
+def create_l4_timeline_agent(
+    model: str = "gemini-3.1-flash-lite",
+    *,
+    before_agent_callback: Any | None = None,
+) -> LlmAgent:
     """Factory for the L4 Timeline Agent.
 
     Reads the L3 result (session state `level_filter`) and the user's
@@ -164,6 +169,15 @@ def create_l4_timeline_agent(model: str = "gemini-3.1-flash-lite") -> LlmAgent:
 
     Returns an LlmAgent whose output_schema is TimelineResult. Output
     is sorted: CRITICAL first, then HIGH, MEDIUM, LOW, STALE.
+
+    Args:
+        model: Gemini model name. Defaults to the Flash-lite tier
+            (low-latency, low-cost).
+        before_agent_callback: Optional ADK ``before_agent_callback``.
+            When provided (typically by ``app.orchestrator``), the
+            orchestrator can skip L4 in O(0 LLM calls) when L1's
+            routing decision excludes it (e.g. ``intent=drill_down``
+            or ``intent=out_of_scope``). When None, L4 always runs.
     """
 
     tools = _build_all_mcp_tools()
@@ -175,4 +189,5 @@ def create_l4_timeline_agent(model: str = "gemini-3.1-flash-lite") -> LlmAgent:
         tools=tools,
         output_schema=TimelineResult,
         output_key="timeline",
+        before_agent_callback=before_agent_callback,
     )

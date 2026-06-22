@@ -153,8 +153,12 @@ def test_run_lumi_query_is_callable() -> None:
 
 
 def test_run_lumi_query_signature_accepts_single_query_string() -> None:
-    """``run_lumi_query`` takes a single ``query: str`` argument and
-    returns a :class:`TimelineResult`."""
+    """``run_lumi_query`` takes a single ``query: str`` argument.
+
+    Returns either a :class:`TimelineResult` (in-scope queries) or a
+    ``str`` apology (out_of_scope queries, wired up in Task #63 so
+    the L1 router can short-circuit the pipeline on irrelevant input).
+    """
     sig = inspect.signature(run_lumi_query)
     params = list(sig.parameters.values())
     assert len(params) == 1
@@ -162,4 +166,7 @@ def test_run_lumi_query_signature_accepts_single_query_string() -> None:
     # ``str`` annotation is fine — under ``from __future__ import
     # annotations`` we don't need to resolve the string form.
     assert params[0].annotation == "str"
-    assert sig.return_annotation == "TimelineResult"
+    # ``TimelineResult | str`` — either a structured timeline or the
+    # OOS apology string. Pydantic stores the union under the
+    # ``Union`` member name in ``typing``.
+    assert sig.return_annotation == "TimelineResult | str"
