@@ -36,16 +36,15 @@ substitutions:
   # Default empty so accidental local builds without --substitutions fail
   # loud rather than push to the wrong project.
   _PROJECT_ID: ""
-  # GOTCHA (Task 27b, 2026-06-22): `SHORT_SHA` is a built-in substitution
-  # (auto-populated from git HEAD in most contexts) but the caller
-  # (deploy.sh) ALWAYS passes it explicitly via --substitutions. If we
-  # reference `${SHORT_SHA:-latest}` (bash default syntax) in the
-  # template, Cloud Build's substitution parser can't find an exact
-  # `${SHORT_SHA}` reference and rejects with: "key 'SHORT_SHA' in the
-  # substitution data is not matched in the template". Fix: declare a
-  # default here + reference `${SHORT_SHA}` (no `:-latest`) in the
-  # template.
-  SHORT_SHA: "latest"
+  # GOTCHA (Task 27b, 2026-06-22): `SHORT_SHA` is a Cloud Build BUILT-IN
+  # substitution (auto-populated from git HEAD). If we try to declare a
+  # default for it in this block (`SHORT_SHA: "latest"`), Cloud Build
+  # treats the key as user-defined and validates against the format
+  # `^_[A-Z0-9_]+$` — `SHORT_SHA` doesn't start with `_`, so it rejects
+  # with: "substitution key SHORT_SHA does not respect format
+  # ^_[A-Z0-9_]+$". Fix: leave the default OUT of this block, and
+  # reference `${SHORT_SHA}` (no `:-latest`) in the template — Cloud
+  # Build auto-populates it from the caller (deploy.sh) or git HEAD.
 
 steps:
   # ---- 1. Build the image using the existing Dockerfile ----
@@ -81,9 +80,10 @@ steps:
 
   # ---- 2. Push both tags (immutable SHA + mutable :latest) ----
   # All `${_VAR}` and `${SHORT_SHA}` references here are valid Cloud Build
-  # substitutions (underscore-prefixed = user-defined, `SHORT_SHA` = our
-  # own default in the substitutions block). Cloud Build substitutes them
-  # before the script runs — bash never sees the `${VAR}` form.
+  # substitutions (underscore-prefixed = user-defined, `SHORT_SHA` =
+  # built-in auto-populated from caller / git HEAD). Cloud Build
+  # substitutes them before the script runs — bash never sees the
+  # `${VAR}` form.
   - id: push
     name: gcr.io/cloud-builders/docker
     entrypoint: bash
