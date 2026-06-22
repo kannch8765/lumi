@@ -63,6 +63,26 @@
               ╚═══════════════════════════╝
 ```
 
+**Mermaid (renders on GitHub, READMEs, and most Markdown viewers):**
+
+```mermaid
+flowchart TD
+    User(["User query<br/>'CS undergrad in Brazil,<br/>want to learn LLMs'"])
+    L1["L1 Identity<br/>no tools — chat in / Pydantic out<br/>→ UserProfile"]
+    L2["L2 Eligibility<br/>catalog MCP, 3 tools<br/>→ CandidateSet"]
+    L3["L3 Level Filter<br/>catalog MCP, 3 tools<br/>→ MatchedSet"]
+    L4["L4 Timeline<br/>catalog + web-search MCPs<br/>→ FreshSet"]
+    Rank["Ranking<br/>code-only, no LLM<br/>sort by urgency → deadline → name"]
+    Output(["Output<br/>urgency / topic / value / sequence views"])
+
+    User --> L1 --> L2 --> L3 --> L4 --> Rank --> Output
+```
+
+The same five-stage shape is enforced in code by
+`app/orchestrator.py:create_lumi_pipeline` (`SequentialAgent` with five
+sub-agents in fixed order). The orchestrator itself holds NO tools
+(CONTEXT.md #10 — the tool whitelist is the kill switch).
+
 ### L1: Identity Agent
 
 - **Input**: raw user message (free-form)
@@ -302,6 +322,29 @@ Drift between layers is impossible because there is one tuple.
        │                                        │
        │                                        ▼
   Claude writes STRIDE threat model ─► risks explicit, reviewed at L3
+```
+
+**Mermaid (renders on GitHub):**
+
+```mermaid
+flowchart LR
+    subgraph dev ["Layer B (dev-time)"]
+        Tools["Tools / Schemas / Tests / STRIDE rows<br/>written in code under pre-commit"]
+    end
+
+    subgraph gate ["Pre-commit gate (9 hooks)"]
+        Checks["semgrep secrets + semgrep lumi<br/>ruff lint + ruff format<br/>pytest -q<br/>lumi-guard (author + banned paths)"]
+    end
+
+    subgraph prod ["Layer A (runtime)"]
+        Runtime["Tool whitelist (kill switch)<br/>Pydantic schema validation<br/>Threat model enforced at L3 review"]
+    end
+
+    Dev(["Caught before deploy"])
+
+    Tools -->|every commit| Checks
+    Checks -->|pass| Runtime
+    Checks -.->|fail| Dev
 ```
 
 **Key insights**:

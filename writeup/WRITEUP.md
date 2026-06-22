@@ -18,20 +18,20 @@ The reason this needs an *agent* rather than a *website* is exactly the eligibil
 
 Lumi's user-facing flow is a four-layer pipeline, followed by a parallel ranking stage. Each layer is a single LLM-backed agent with one narrow responsibility; the orchestrator enforces the order in code, not in a prompt.
 
+```mermaid
+flowchart TD
+    User(["User query<br/>'CS undergrad in Brazil,<br/>want to learn LLMs'"])
+    L1["L1 Identity<br/>no tools — chat in / Pydantic out<br/>→ UserProfile"]
+    L2["L2 Eligibility<br/>catalog MCP, 3 tools<br/>→ CandidateSet"]
+    L3["L3 Level Filter<br/>catalog MCP, 3 tools<br/>→ MatchedSet"]
+    L4["L4 Timeline<br/>catalog + web-search MCPs<br/>→ FreshSet"]
+    Rank["Ranking<br/>code-only, no LLM<br/>sort by urgency → deadline → name"]
+    Output(["Output<br/>urgency / topic / value / sequence views"])
+
+    User --> L1 --> L2 --> L3 --> L4 --> Rank --> Output
 ```
-User query
-   ↓
-L1 Identity   → UserProfile     (level, location, age, goal, language, institution)
-   ↓
-L2 Eligibility → CandidateSet   (geo / age / institution / language filters)
-   ↓
-L3 Level       → MatchedSet     (drops "too easy" and "too hard")
-   ↓
-L4 Timeline    → FreshSet       (deadlines + "last verified" stamps)
-   ↓
-Parallel ranking → RecommendationResponse
-   (urgency | topic | value | sequence)
-```
+
+*(ASCII fallback for non-Mermaid renderers: see [`ARCHITECTURE.md §Agent Pipeline`](../ARCHITECTURE.md#agent-pipeline-4-layer-sequential-parallel-output).)*
 
 **L1 — Identity.** Free-form chat in, structured `UserProfile` out. The agent extracts what it can and asks for what it cannot infer. It cannot assume a country, cannot bypass identity, cannot store the profile beyond the session.
 
@@ -92,6 +92,27 @@ They are not redundant — they serve different attackers, and each row in one s
 The split is by **audience**, not by mechanism. A control that protects a student running the deployed app (Layer A) is structurally different from a control that protects me while writing the code (Layer B). If you collapse them, you end up either with too few runtime controls (because dev-time controls can't be enforced at runtime) or too many dev-time controls (because runtime controls slow down iteration).
 
 The **bridge** between layers is the most important part. Pre-commit is the literal "compile + test" gate. When I write a new tool, it passes through Layer B's pre-commit (semgrep, ruff, pytest) *before* it can show up in Layer A's tool whitelist. If it fails any gate, it never reaches the user.
+
+```mermaid
+flowchart LR
+    subgraph dev ["Layer B (dev-time)"]
+        Tools["Tools / Schemas / Tests / STRIDE rows<br/>written in code under pre-commit"]
+    end
+
+    subgraph gate ["Pre-commit gate (9 hooks)"]
+        Checks["semgrep secrets + semgrep lumi<br/>ruff lint + ruff format<br/>pytest -q<br/>lumi-guard (author + banned paths)"]
+    end
+
+    subgraph prod ["Layer A (runtime)"]
+        Runtime["Tool whitelist (kill switch)<br/>Pydantic schema validation<br/>Threat model enforced at L3 review"]
+    end
+
+    Dev(["Caught before deploy"])
+
+    Tools -->|every commit| Checks
+    Checks -->|pass| Runtime
+    Checks -.->|fail| Dev
+```
 
 **Pydantic schemas have dual citizenship.** A schema I write in Layer B (`class UserProfile(BaseModel): ...`) is enforced at runtime in Layer A. The same artifact protects in both worlds — written once, validated twice.
 
