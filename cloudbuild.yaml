@@ -39,6 +39,14 @@ substitutions:
 
 steps:
   # ---- 1. Build the image using the existing Dockerfile ----
+  # GOTCHA (Task 27b, 2026-06-22): bash variables referenced as
+  # `${VAR}` inside the script are misread by Cloud Build as substitution
+  # requests. If `VAR` isn't a built-in (PROJECT_ID, SHORT_SHA, etc.) or
+  # user-defined (underscore-prefixed), Cloud Build rejects the template
+  # with `key in the template 'IMAGE' is not a valid built-in
+  # substitution`. Fix: use `$${VAR}` (double-dollar) to escape — the
+  # first `$` becomes a literal `$` in the rendered script, then bash
+  # dereferences the variable normally.
   - id: build
     name: gcr.io/cloud-builders/docker
     entrypoint: bash
@@ -55,13 +63,16 @@ steps:
         docker build \
           --build-arg COMMIT_SHA="${SHORT_SHA:-}" \
           --cache-from "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/lumi:latest" \
-          --tag "${IMAGE}" \
+          --tag "$${IMAGE}" \
           --tag "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/lumi:latest" \
           -f Dockerfile \
           .
-        echo "Built: ${IMAGE}"
+        echo "Built: $${IMAGE}"
 
   # ---- 2. Push both tags (immutable SHA + mutable :latest) ----
+  # All `${_VAR}` references here are valid Cloud Build user-defined
+  # substitutions (underscore-prefixed), so Cloud Build substitutes them
+  # before the script runs — bash never sees the `${_VAR}` form.
   - id: push
     name: gcr.io/cloud-builders/docker
     entrypoint: bash
