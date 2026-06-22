@@ -172,7 +172,19 @@ def _rank_after_agent(
         )
         return genai_types.Content(role="model", parts=[])
 
-    ranked = rank_timeline_entries(raw_timeline)
+    try:
+        ranked = rank_timeline_entries(raw_timeline)
+    except Exception as exc:  # defense-in-depth
+        # The caller (run_lumi_query) prefers ranked_timeline over
+        # timeline, so a swallowed exception silently drops the sort.
+        # Log loudly so future regression tests catch this.
+        logger.warning(
+            "ranker callback: rank_timeline_entries raised %r; "
+            "returning empty Content (ranker output dropped)",
+            exc,
+            exc_info=True,
+        )
+        return genai_types.Content(role="model", parts=[])
     # ADK 2.2.0 persists session state to JSON after the runner
     # finishes. Pydantic models aren't JSON-serializable by default,
     # so we store the dict form here and re-coerce on read in

@@ -65,18 +65,27 @@ gcloud builds submit "${REPO_ROOT}" \
   --timeout=600s
 
 # --- Collect env vars for Cloud Run --------------------------------------
-# Forward any GEMINI_*, GOOGLE_*, LUMI_*, OTEL_* vars from the shell
-# (loaded above from .env.production) to the running service.
+# Allow-list of env-var prefixes that the deployed service is allowed
+# to receive. Anything else in the shell is filtered out — denies by
+# default, allow by exception. This prevents accidental leak of local
+# service-account JSON paths, ad-hoc GOOGLE_AUTH_* tokens, or other
+# secrets that may be in the developer's shell but aren't documented
+# as runtime configuration. The README's "Environment variables"
+# table is the source of truth for what the service expects.
+ALLOWED_ENV_PREFIXES=(
+  "GEMINI_"
+  "GOOGLE_CLOUD_"     # PROJECT, LOCATION — Vertex AI mode
+  "GOOGLE_GENAI_"     # USE_VERTEXAI toggle
+  "LUMI_"
+  "OTEL_"
+)
 ENV_VARS=()
-for var in $(compgen -e | grep -E '^(GEMINI|GOOGLE|LUMI|OTEL)_' | sort -u); do
-  # Skip the GOOGLE_APPLICATION_CREDENTIALS path — Cloud Run uses the
-  # service account identity, not a local key file.
-  if [[ "${var}" == "GOOGLE_APPLICATION_CREDENTIALS" ]]; then
-    continue
-  fi
-  value="${!var}"
-  # Cloud Run env-var syntax: KEY=VALUE,KEY=VALUE
-  ENV_VARS+=("${var}=${value}")
+for prefix in "${ALLOWED_ENV_PREFIXES[@]}"; do
+  for var in $(compgen -e | grep -E "^${prefix}" | sort -u); do
+    value="${!var}"
+    # Cloud Run env-var syntax: KEY=VALUE,KEY=VALUE
+    ENV_VARS+=("${var}=${value}")
+  done
 done
 ENV_VARS_CSV=""
 if (( ${#ENV_VARS[@]} > 0 )); then
@@ -85,9 +94,10 @@ fi
 
 # --- Deploy to Cloud Run --------------------------------------------------
 # Flags:
-#   --allow-unauthenticated    Demo / Kaggle capstone surface; replace
-#                              with --no-allow-unauthenticated + IAM
-#                              before opening to the public internet.
+#   --allow-unauthenticated    Demo / Kaggle capstone surface. Override
+#                              via ALLOW_UNAUTHENTICATED=false (set
+#                              --no-allow-unauthenticated) for any
+#                              non-demo deploy to require IAM auth.
 #   --cpu-boost                Reduces cold-start latency for the demo.
 #   --min-instances=0          Scales to zero (free tier friendly).
 #   --max-instances            Caps runaway scaling (cost guardrail).
@@ -101,13 +111,13 @@ fi
 #                              E2E baseline observed ~700 MiB peak).
 MAX_INSTANCES="${MAX_INSTANCES:-1}"
 CONCURRENCY="${CONCURRENCY:-1}"
+ALLOW_UNAUTHENTICATED="${ALLOW_UNAUTHENTICATED:-true}"
 DEPLOY_ARGS=(
   run deploy "${SERVICE_NAME}"
   --project="${PROJECT_ID}"
   --region="${REGION}"
   --image="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/lumi:${DEPLOY_SHA}"
   --platform=managed
-  --allow-unauthenticated
   --cpu-boost
   --min-instances=0
   --max-instances="${MAX_INSTANCES}"
@@ -117,6 +127,11 @@ DEPLOY_ARGS=(
   --memory=1Gi
   --cpu=1
 )
+if [[ "${ALLOW_UNAUTHENTICATED}" == "true" ]]; then
+  DEPLOY_ARGS+=(--allow-unauthenticated)
+else
+  DEPLOY_ARGS+=(--no-allow-unauthenticated)
+fi
 if [[ -n "${ENV_VARS_CSV}" ]]; then
   DEPLOY_ARGS+=(--set-env-vars="${ENV_VARS_CSV}")
 fi

@@ -8,6 +8,13 @@ Used by:
 - Cloud Run:  CMD ["uv", "run", "uvicorn", "app.fast_api_app:app", ...]
               (see Dockerfile)
 
+When running under `uv run uvicorn ...`, MCP stdio subprocesses
+inherit the same venv via `sys.executable` (see
+`app/agents/l2_eligibility.py` for the gotcha). If a future operator
+runs uvicorn from a different Python interpreter (e.g. system Python
+or a stale venv), the MCP subprocesses will diverge — use
+`uv run uvicorn ...` to keep the parent and subprocesses in lockstep.
+
 The ``agents_dir`` points at the package containing the ``root_agent``
 entry point (see ``app/agents/agent.py`` — Task 56). ADK's
 ``AgentLoader`` discovers it via the standard ``agent.py + root_agent``

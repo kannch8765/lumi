@@ -96,9 +96,13 @@ def _build_resource_catalog_toolset() -> McpToolset:
     """Toolset wrapping the resource-catalog MCP server (Task 20).
 
     The MCP server runs as a stdio subprocess that the ADK orchestrator
-    launches. We use `uv run` so the subprocess resolves the same
-    project venv as the orchestrator (Lumi known gotcha #1 in
-    `.claude/PLAN.md`).
+    launches. We use the parent process's `sys.executable` so the
+    subprocess inherits the same venv and the same `mcp` version
+    (CONTEXT.md #14). `uv run` was tried first but triggered a
+    `uv.lock` parse error on every MCP server startup — see
+    `app/agents/l2_eligibility.py` for the full explanation.
+    ``tool_filter`` restricts the agent to the three allow-listed
+    catalog tools (CONTEXT.md #10).
     """
 
     return McpToolset(
