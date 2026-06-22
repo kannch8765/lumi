@@ -126,7 +126,7 @@ Mapping each Kaggle requirement to our task status:
 | Key concept 5: Deployability | 🟡 TBD — Task 27 | Cloud Run manifest ready, deploy pending |
 | Key concept 6: Agent skills / CLI | 🟡 TBD | Maybe use `adk run` in demo |
 | Kaggle Writeup (≤ 2,500 words) | 🟡 §1-5 done | §6-7 pending real run data — Task 39 |
-| Media Gallery (cover image) | ❌ Task 40 | Not started |
+| Media Gallery (cover image) | ✅ Task 40 | [`writeup/cover.png`](./cover.png) — 833×1065, title + 4-layer pipeline + tagline (github/test counts) |
 | Public Video (≤ 5 min) | ❌ Task 28 | Not started |
 | Public Project Link | ✅ | Repo: <https://github.com/kannch8765/lumi> (already public); live demo URL pending Task 27 |
 | Documentation: README.md | ✅ | Project root |

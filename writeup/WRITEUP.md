@@ -1,5 +1,7 @@
 # Lumi — A Multi-Agent System for Finding Free AI Learning Resources
 
+![Cover image: Lumi — Multi-Agent System for Free AI Learning Resources](./cover.png)
+
 *Design narrative (Sections 1–4 of the Kaggle writeup). Sections 5–8 (implementation, results, demo, lessons) follow.*
 
 ---
