@@ -36,6 +36,16 @@ substitutions:
   # Default empty so accidental local builds without --substitutions fail
   # loud rather than push to the wrong project.
   _PROJECT_ID: ""
+  # GOTCHA (Task 27b, 2026-06-22): `SHORT_SHA` is a built-in substitution
+  # (auto-populated from git HEAD in most contexts) but the caller
+  # (deploy.sh) ALWAYS passes it explicitly via --substitutions. If we
+  # reference `${SHORT_SHA:-latest}` (bash default syntax) in the
+  # template, Cloud Build's substitution parser can't find an exact
+  # `${SHORT_SHA}` reference and rejects with: "key 'SHORT_SHA' in the
+  # substitution data is not matched in the template". Fix: declare a
+  # default here + reference `${SHORT_SHA}` (no `:-latest`) in the
+  # template.
+  SHORT_SHA: "latest"
 
 steps:
   # ---- 1. Build the image using the existing Dockerfile ----
@@ -59,9 +69,9 @@ steps:
           echo "Pass --substitutions=_PROJECT_ID=<your-project-id> or configure the trigger." >&2
           exit 1
         fi
-        IMAGE="${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/lumi:${SHORT_SHA:-latest}"
+        IMAGE="${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/lumi:${SHORT_SHA}"
         docker build \
-          --build-arg COMMIT_SHA="${SHORT_SHA:-}" \
+          --build-arg COMMIT_SHA="${SHORT_SHA}" \
           --cache-from "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/lumi:latest" \
           --tag "$${IMAGE}" \
           --tag "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/lumi:latest" \
@@ -70,9 +80,10 @@ steps:
         echo "Built: $${IMAGE}"
 
   # ---- 2. Push both tags (immutable SHA + mutable :latest) ----
-  # All `${_VAR}` references here are valid Cloud Build user-defined
-  # substitutions (underscore-prefixed), so Cloud Build substitutes them
-  # before the script runs — bash never sees the `${_VAR}` form.
+  # All `${_VAR}` and `${SHORT_SHA}` references here are valid Cloud Build
+  # substitutions (underscore-prefixed = user-defined, `SHORT_SHA` = our
+  # own default in the substitutions block). Cloud Build substitutes them
+  # before the script runs — bash never sees the `${VAR}` form.
   - id: push
     name: gcr.io/cloud-builders/docker
     entrypoint: bash
@@ -80,9 +91,9 @@ steps:
       - -c
       - |
         set -euo pipefail
-        docker push "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/lumi:${SHORT_SHA:-latest}"
+        docker push "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/lumi:${SHORT_SHA}"
         docker push "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/lumi:latest"
 
 images:
-  - "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/lumi:${SHORT_SHA:-latest}"
+  - "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/lumi:${SHORT_SHA}"
   - "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO}/lumi:latest"
