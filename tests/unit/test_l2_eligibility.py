@@ -19,8 +19,10 @@ in Task 26 (``tests/unit/test_l2_eligibility_injection.py`` and the
 
 from __future__ import annotations
 
+import pytest
 from google.adk.agents import LlmAgent
 from google.adk.tools.mcp_tool import McpToolset
+from pydantic import ValidationError
 
 from app.agents.l2_eligibility import create_l2_eligibility_agent
 from app.agents.schemas import (
@@ -188,3 +190,36 @@ def test_identity_profile_does_not_pollute_l2_schema() -> None:
     # And L2's output is its own type, not a subclass of IdentityProfile.
     result = EligibilityResult(eligible=[], reasoning="")
     assert not isinstance(result, IdentityProfile)
+
+
+# ─── ask_back field (CONTEXT.md #22) ────────────────────────────────────
+
+
+def test_eligibility_result_accepts_ask_back() -> None:
+    """``EligibilityResult`` accepts a string ``ask_back`` field."""
+
+    result = EligibilityResult(
+        eligible=[],
+        reasoning="profile too thin",
+        ask_back="what's your age?",
+    )
+    assert result.ask_back == "what's your age?"
+
+
+def test_eligibility_result_ask_back_max_length_500() -> None:
+    """A 501-char ``ask_back`` raises ``ValidationError`` (CONTEXT.md #22)."""
+
+    too_long = "q" * 501
+    with pytest.raises(ValidationError):
+        EligibilityResult(
+            eligible=[],
+            reasoning="too sparse",
+            ask_back=too_long,
+        )
+
+
+def test_eligibility_result_ask_back_defaults_to_none() -> None:
+    """``ask_back`` defaults to ``None`` when not supplied."""
+
+    result = EligibilityResult(eligible=[], reasoning="ok")
+    assert result.ask_back is None

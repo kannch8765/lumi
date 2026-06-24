@@ -152,3 +152,38 @@ def test_user_level_optional() -> None:
         reasoning="Identity profile too sparse to infer a level.",
     )
     assert result.user_level is None
+
+
+# ─── ask_back field (CONTEXT.md #22) ────────────────────────────────────
+
+
+def test_level_filter_result_accepts_ask_back() -> None:
+    """``LevelFilterResult`` accepts a string ``ask_back`` field."""
+
+    result = LevelFilterResult(
+        matches=[],
+        user_level=None,
+        reasoning="can't infer level",
+        ask_back="what's your current skill level?",
+    )
+    assert result.ask_back == "what's your current skill level?"
+
+
+def test_level_filter_result_ask_back_max_length_500() -> None:
+    """A 501-char ``ask_back`` raises ``ValidationError`` (CONTEXT.md #22)."""
+
+    too_long = "q" * 501
+    with pytest.raises(ValidationError):
+        LevelFilterResult(
+            matches=[],
+            user_level=None,
+            reasoning="too sparse",
+            ask_back=too_long,
+        )
+
+
+def test_level_filter_result_ask_back_defaults_to_none() -> None:
+    """``ask_back`` defaults to ``None`` when not supplied."""
+
+    result = LevelFilterResult(matches=[], user_level=None, reasoning="ok")
+    assert result.ask_back is None

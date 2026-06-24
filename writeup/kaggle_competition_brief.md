@@ -119,12 +119,12 @@ Mapping each Kaggle requirement to our task status:
 | Kaggle requirement | Lumi status | Notes |
 |---|---|---|
 | Track: Agents for Good | ✅ Selected | Mission = free AI learning resources for students worldwide |
-| Key concept 1: Multi-agent system (ADK) | ✅ 4-layer pipeline | L1 → L2 → L3 → L4 (SequentialAgent) + ranker (parallel output stage) |
+| Key concept 1: Multi-agent system (ADK) | ✅ 5-layer pipeline | L1 → L2 → L3 → L4 → L5 (SequentialAgent, 6 sub-agents) + ranker (parallel output stage). L5 Synthesizer has zero tools and emits the final markdown recommendation. |
 | Key concept 2: MCP Server | ✅ 2 servers | `resource-catalog` (3 tools) + `web-search` (1 tool) |
 | Key concept 3: Antigravity | 🟡 TBD — Task 28 | Demo video (Task 28 — owner-led) |
-| Key concept 4: Security features | ✅ Defense-in-depth | Schema caps, tool whitelist, semgrep, prompt-injection suite (161 tests) |
-| Key concept 5: Deployability | 🟡 TBD — Task 27 | Cloud Run manifest ready, deploy pending |
-| Key concept 6: Agent skills / CLI | 🟡 TBD | Maybe use `adk run` in demo |
+| Key concept 4: Security features | ✅ Defense-in-depth | Schema caps, tool whitelist, semgrep, prompt-injection suite (363 tests, 9 deselected for E2E + manual) |
+| Key concept 5: Deployability | ✅ Task 27 | Test-deploy-then-tear-down completed 2026-06-22 (5 real gotchas captured in deploy/README.md + WRITEUP.md §6) |
+| Key concept 6: Agent skills / CLI | ✅ Task 56 | adk CLI demonstrated in WRITEUP.md §5.6 (Task 56 done). `app/agents/agent.py` exposes `root_agent = create_lumi_pipeline()`. |
 | Kaggle Writeup (≤ 2,500 words) | 🟡 §1-5 done | §6-7 pending real run data — Task 39 |
 | Media Gallery (cover image) | ✅ Task 40 | [`writeup/cover.png`](./cover.png) — 833×1065, title + 4-layer pipeline + tagline (github/test counts) |
 | Public Video (≤ 5 min) | ❌ Task 28 | Not started |
@@ -132,8 +132,8 @@ Mapping each Kaggle requirement to our task status:
 | Documentation: README.md | ✅ | Project root |
 | No API keys in code | ✅ | `.env` gitignored, semgrep blocks AIza/sk-/AQ/ghp_ patterns |
 
-**Current coverage: 4/6 key concepts demonstrated in code, 1 in security
-docs. Remaining: Antigravity + Deployability (both live video-only).**
+**Current coverage: 6/6 key concepts demonstrated in code + security
+docs. Remaining: Public Video (Task 28) and final submission (Task 30).**
 
 ## Citation (use this in the Writeup)
 

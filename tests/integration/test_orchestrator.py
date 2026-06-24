@@ -49,14 +49,20 @@ def test_pipeline_name_is_lumi_pipeline() -> None:
     assert pipeline.name == "lumi_pipeline"
 
 
-def test_pipeline_has_five_sub_agents() -> None:
-    """The pipeline has exactly five sub-agents: L1, L2, L3, L4, ranker."""
+def test_pipeline_has_six_sub_agents() -> None:
+    """The pipeline has exactly six sub-agents: L1, L2, L3, L4, ranker, L5.
+
+    L5 (the Synthesizer) was added so the CLI surfaces a final
+    markdown recommendation instead of raw JSON dumps. See
+    ``app/agents/l5_synthesizer.py``.
+    """
     pipeline = create_lumi_pipeline()
-    assert len(pipeline.sub_agents) == 5
+    assert len(pipeline.sub_agents) == 6
 
 
 def test_pipeline_sub_agents_are_in_correct_order() -> None:
-    """Sub-agents appear in the canonical order L1 → L2 → L3 → L4 → ranker.
+    """Sub-agents appear in the canonical order L1 → L2 → L3 → L4 →
+    ranker → L5.
 
     ARCHITECTURE.md §Agent Pipeline mandates the order; if this test
     ever fails, the security model has been silently broken (a
@@ -70,6 +76,7 @@ def test_pipeline_sub_agents_are_in_correct_order() -> None:
         "l3_level",
         "l4_timeline",
         "timeline_ranker",
+        "l5_synthesizer",
     ]
 
 
@@ -94,6 +101,7 @@ def test_pipeline_sub_agents_use_documented_output_keys() -> None:
         STATE_KEY_LEVEL_FILTER,
         STATE_KEY_TIMELINE,
         STATE_KEY_RANKED_TIMELINE,
+        "final_recommendation",
     ]
 
 
@@ -120,10 +128,13 @@ def test_pipeline_orchestrator_has_no_tools() -> None:
 def test_ranker_sub_agent_has_after_agent_callback() -> None:
     """The ranker sub-agent is wired to a non-trivial
     ``after_agent_callback`` — that callback is what does the real
-    ranking work (ARCHITECTURE.md §Parallel Output Stage)."""
+    ranking work (ARCHITECTURE.md §Parallel Output Stage).
+
+    Note: with L5 added, the ranker is no longer the last sub-agent.
+    We locate it by name.
+    """
     pipeline = create_lumi_pipeline()
-    ranker = pipeline.sub_agents[-1]
-    assert ranker.name == "timeline_ranker"
+    ranker = next(a for a in pipeline.sub_agents if a.name == "timeline_ranker")
     callback = ranker.after_agent_callback
     assert callback is not None
     # The callback must be callable (ADK invokes it on agent completion).
@@ -139,7 +150,7 @@ def test_pipeline_accepts_model_override() -> None:
     """
     pipeline = create_lumi_pipeline(model="gemini-2.5-pro")
     assert pipeline.name == "lumi_pipeline"
-    assert len(pipeline.sub_agents) == 5
+    assert len(pipeline.sub_agents) == 6
 
 
 # ── Public surface ─────────────────────────────────────────────────────
@@ -155,9 +166,12 @@ def test_run_lumi_query_is_callable() -> None:
 def test_run_lumi_query_signature_accepts_single_query_string() -> None:
     """``run_lumi_query`` takes a single ``query: str`` argument.
 
-    Returns either a :class:`TimelineResult` (in-scope queries) or a
-    ``str`` apology (out_of_scope queries, wired up in Task #63 so
-    the L1 router can short-circuit the pipeline on irrelevant input).
+    Returns one of three types, discriminated by content:
+    - :class:`TimelineResult` — structured ranked list (fallback path).
+    - :class:`RecommendationResponse` — final user-facing
+      recommendation (happy path through L5).
+    - ``str`` — apology (out_of_scope) or ask_back clarification
+      question (insufficient user info).
     """
     sig = inspect.signature(run_lumi_query)
     params = list(sig.parameters.values())
@@ -166,7 +180,6 @@ def test_run_lumi_query_signature_accepts_single_query_string() -> None:
     # ``str`` annotation is fine — under ``from __future__ import
     # annotations`` we don't need to resolve the string form.
     assert params[0].annotation == "str"
-    # ``TimelineResult | str`` — either a structured timeline or the
-    # OOS apology string. Pydantic stores the union under the
-    # ``Union`` member name in ``typing``.
-    assert sig.return_annotation == "TimelineResult | str"
+    # The return union is the API contract — callers ``isinstance``-
+    # check to decide which path to render.
+    assert sig.return_annotation == ("TimelineResult | RecommendationResponse | str")

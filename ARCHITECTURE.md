@@ -4,7 +4,7 @@
 > (courses, competitions, API credits, GPU resources) by removing
 > financial, geographic, and informational barriers.
 
-## Agent Pipeline (4-layer sequential, parallel output)
+## Agent Pipeline (6-layer sequential, parallel output)
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
@@ -60,6 +60,19 @@
               ║   - by topic              ║
               ║   - by value saved        ║
               ║   - by learning sequence  ║
+              ╚═════════════╤═════════════╝
+                            ↓
+              ╔═══════════════════════════╗
+              ║  L5: SYNTHESIZER AGENT    ║  ← "What should I say?"
+              ║  ─────────────────────── ║
+              ║  Zero tools. Reads typed  ║
+              ║  session state, emits a   ║
+              ║  structured               ║
+              ║  RecommendationResponse   ║
+              ║  (markdown + language +   ║
+              ║  follow_up).              ║
+              ║  Output: user-visible     ║
+              ║  markdown reply.          ║
               ╚═══════════════════════════╝
 ```
 
@@ -73,13 +86,14 @@ flowchart TD
     L3["L3 Level Filter<br/>catalog MCP, 3 tools<br/>→ MatchedSet"]
     L4["L4 Timeline<br/>catalog + web-search MCPs<br/>→ FreshSet"]
     Rank["Ranking<br/>code-only, no LLM<br/>sort by urgency → deadline → name"]
+    L5["L5 Synthesizer<br/>no tools — reads typed state<br/>→ RecommendationResponse<br/>(markdown + language + follow_up)"]
     Output(["Output<br/>urgency / topic / value / sequence views"])
 
-    User --> L1 --> L2 --> L3 --> L4 --> Rank --> Output
+    User --> L1 --> L2 --> L3 --> L4 --> Rank --> L5 --> Output
 ```
 
-The same five-stage shape is enforced in code by
-`app/orchestrator.py:create_lumi_pipeline` (`SequentialAgent` with five
+The same six-stage shape is enforced in code by
+`app/orchestrator.py:create_lumi_pipeline` (`SequentialAgent` with six
 sub-agents in fixed order). The orchestrator itself holds NO tools
 (CONTEXT.md #10 — the tool whitelist is the kill switch).
 
@@ -134,14 +148,115 @@ sub-agents in fixed order). The orchestrator itself holds NO tools
   - Guarantee continued availability
   - Reserve seats or queue on behalf of user
 
+### L5: Synthesizer Agent
+
+L5 is the only L-layer that produces user-facing natural language.
+It reads the sorted timeline plus the user's identity profile and
+emits a structured `RecommendationResponse` (markdown body + ISO
+639-1 language tag + optional follow-up question). The CLI and
+FastAPI surfaces render the `markdown` field directly.
+
+#### Pipeline position
+
+L5 is the 6th and final layer. It runs AFTER the timeline ranker
+and BEFORE the pipeline returns to the user. Skip behavior:
+
+- L5's `before_agent_callback` skips L5 if `state['ask_back']` is
+  set (an earlier layer fired ask_back and the question is the
+  final reply).
+- L5's `before_agent_callback` also skips L5 if
+  `l5_synthesizer` is not in `state['identity']['target_agents']`
+  (L1 routed away).
+
+#### Input
+
+L5 reads:
+- `state['identity']` — the user's profile (language preference,
+  etc.).
+- `state['ranked_timeline']` — the sorted TimelineResult from the
+  ranker.
+
+#### Output
+
+`RecommendationResponse` (see `app/agents/schemas.py`):
+- `markdown: str` (1..3000 chars) — the user-facing recommendation.
+- `language: str` (2..10 chars) — ISO 639-1 / BCP-47 code.
+- `follow_up: str | None` (≤200 chars) — optional follow-up question.
+
+#### Security model
+
+- **Zero tools** (CONTEXT.md #10). L5 cannot browse, cannot call
+  the catalog, cannot search the web. It reads typed session state
+  and emits structured output only.
+- **Refusal-pattern scrub.** Pydantic
+  `RecommendationResponse._scrub_refusal_patterns` rejects any
+  markdown containing "system prompt", "my instructions", or
+  "instruction zone" (case-insensitive) — CONTEXT.md #19.
+- **No PII echo.** The INSTRUCTION zone explicitly forbids echoing
+  the user's age, location, or education_level into the reply.
+- **URLs are copied verbatim** from `state['ranked_timeline']`.
+  No invented URLs.
+- **Fallback path.** If L5's structured output fails validation
+  (length cap, refusal-pattern scrub), the
+  `after_agent_callback` falls back to a code-rendered markdown
+  summary built directly from `state['ranked_timeline']`.
+
+## Ask-back pattern
+
+Each L-layer (L2/L3/L4) can emit an `ask_back` field in its
+structured output. When the field is non-empty, the orchestrator
+short-circuits the pipeline to the user with the question as the
+final reply.
+
+### Flow
+
+1. L-layer's LLM produces structured output with `ask_back` set.
+2. L-layer's `after_agent_callback` (built by
+   `_make_ask_back_after_agent_callback`) lifts the string into
+   `state['ask_back']`.
+3. Subsequent `before_agent_callback`s read `state['ask_back']`
+   and skip their agent (returns empty Content, zero LLM calls).
+4. `run_lumi_query` returns the `ask_back` string as the final
+   reply.
+
+### When does each layer fire ask_back?
+
+- **L2** — when `state['identity']` has no age, location,
+  education_level, or language (no useful filtering possible).
+- **L3** — when `state['identity'].education_level` is None and
+  the goals give no skill-level signal (can't determine
+  user_level).
+- **L4** — when `state['level_filter'].matches` is empty (L3
+  returned nothing — ask the user to broaden the topic).
+
+### Why a flat `state['ask_back']` key?
+
+Three reasons:
+1. **Single source of truth** — one key read by all
+   `before_agent_callback`s, no field-by-field polling.
+2. **Cross-turn friendly** — the next user message triggers a
+   fresh full pipeline run; L1 re-extracts identity with the new
+   context.
+3. **Mirrors the existing `target_agents` skip pattern** — same
+   `before_agent_callback` shape, no new exception path.
+
+### L1 too-sparse case
+
+L1 itself can short-circuit via the existing OOS apology path
+when the query is so vague that no field can be extracted with
+confidence ≥ 0.3 (e.g. "hi"). This avoids a new intent type —
+the apology IS the user reply, same as the OOS path.
+
 ### Pipeline orchestrator (`app/orchestrator.py`)
 
-The four LlmAgents are wired by `google.adk.agents.SequentialAgent` in
-`create_lumi_pipeline()`. Session state keys chain: `identity` →
-`eligibility` → `level_filter` → `timeline`. A final ranking step
-(an `LlmAgent` shell with an `after_agent_callback` wrapping
+The six sub-agents are wired by `google.adk.agents.SequentialAgent`
+in `create_lumi_pipeline()`. Session state keys chain: `identity`
+→ `eligibility` → `level_filter` → `timeline` → `ranked_timeline`
+→ `final_recommendation`. A code-only ranking step (an `LlmAgent`
+shell with an `after_agent_callback` wrapping
 `app.ranking.py:rank_timeline_entries`) sorts the L4 output by
-urgency, deadline proximity, and resource name.
+urgency, deadline proximity, and resource name. L5 (Synthesizer)
+turns the ranked timeline into a user-facing markdown reply.
 
 The orchestrator itself has **no tools** — it is pure delegation
 (CONTEXT.md #10 — tool whitelist is the kill switch).
@@ -150,6 +265,29 @@ Known tech debt: `SequentialAgent` is deprecated in ADK 2.x in
 favor of `Workflow`. The pipeline shape migrates cleanly; the
 ranker-as-LlmAgent trick may need a `BaseAgent` subclass after the
 migration.
+
+### `run_lumi_query` short-circuit order
+
+`app/orchestrator.py:run_lumi_query` returns one of three shapes:
+`TimelineResult | RecommendationResponse | str`. The first match
+in the following order wins:
+
+1. **`state['ask_back']`** — set by an L-layer's
+   `after_agent_callback` when the structured output contains a
+   non-empty `ask_back` field. Returns the clarification question
+   as a `str`.
+2. **`state['final_user_response']`** — set by the ranker callback
+   when L1 marked the query as `out_of_scope`. Returns the apology
+   as a `str`.
+3. **`state['final_recommendation']`** — set by L5's `output_key`.
+   Returns a `RecommendationResponse` (markdown + language +
+   follow_up).
+4. **`state['ranked_timeline']`** — set by the ranker's
+   `after_agent_callback`. Returns a sorted `TimelineResult`.
+5. **`state['timeline']`** — fallback for callers that ran only
+   the first 4 layers. Returns a sorted `TimelineResult`.
+6. Empty `TimelineResult()` — last-resort default so callers
+   always receive a structured payload.
 
 ## Parallel Output Stage
 

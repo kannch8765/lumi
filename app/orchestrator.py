@@ -1,30 +1,45 @@
 """Lumi pipeline orchestrator.
 
 This module wires the four L-layer agents (L1 Identity, L2 Eligibility,
-L3 Level Filter, L4 Timeline) into an ADK :class:`SequentialAgent` and
-adds a final parallel-output ranking step. The orchestrator itself
-holds NO tools — it is pure delegation (CONTEXT.md #10 — the tool
-whitelist is the kill switch; the orchestrator cannot do anything its
-sub-agents cannot do, and it owns no tool surface that could become a
-new attack vector).
+L3 Level Filter, L4 Timeline) plus the timeline ranker and the L5
+Synthesizer into an ADK :class:`SequentialAgent`. The orchestrator
+itself holds NO tools — it is pure delegation (CONTEXT.md #10 — the
+tool whitelist is the kill switch; the orchestrator cannot do anything
+its sub-agents cannot do, and it owns no tool surface that could
+become a new attack vector).
 
 Pipeline shape::
 
     lumi_pipeline (SequentialAgent)
-    └── l1_identity        -> state['identity']      :class:`IdentityProfile`
-    └── l2_eligibility     -> state['eligibility']   :class:`EligibilityResult`
-    └── l3_level           -> state['level_filter']  :class:`LevelFilterResult`
-    └── l4_timeline        -> state['timeline']      :class:`TimelineResult`
-    └── timeline_ranker    -> state['ranked_timeline'] (TimelineResult, sorted)
+    └── l1_identity        -> state['identity']            :class:`IdentityProfile`
+    └── l2_eligibility     -> state['eligibility']         :class:`EligibilityResult`
+    └── l3_level           -> state['level_filter']        :class:`LevelFilterResult`
+    └── l4_timeline        -> state['timeline']            :class:`TimelineResult`
+    └── timeline_ranker    -> state['ranked_timeline']     (TimelineResult, sorted)
+    └── l5_synthesizer     -> state['final_recommendation'] :class:`RecommendationResponse`
 
 The first four sub-agents are the 4-layer pipeline (ARCHITECTURE.md
 §Agent Pipeline). The fifth is a non-LLM code step — a thin ADK
 agent whose ``instruction`` is a no-op and whose ``output_key`` is
 written by an ``after_agent_callback`` that runs
 :func:`app.ranking.rank_timeline_entries` against ``state['timeline']``.
-This keeps the parallel-ranking stage inside the SequentialAgent
-boundary so the pipeline remains a single ADK ``agent`` object that
-callers can hand to a :class:`~google.adk.runners.Runner`.
+The sixth is the L5 Synthesizer, which reads the ranked timeline and
+the identity profile, emits a structured
+:class:`RecommendationResponse` (markdown + language + follow-up),
+and surfaces the markdown as the final user-visible turn via its
+``after_agent_callback``.
+
+Ask-back pattern
+================
+
+Each L-layer (L2/L3/L4) can emit an ``ask_back`` field in its
+structured output. When set, the corresponding
+``after_agent_callback`` lifts the string into the flat session-state
+key ``state['ask_back']`` and returns a ``Content`` whose text is
+the question. Subsequent ``before_agent_callback``s read
+``state['ask_back']`` and skip their agent (zero LLM calls), so the
+pipeline halts cleanly. ``run_lumi_query`` then returns the
+``ask_back`` string verbatim.
 
 Injecting the user's raw query
 ==============================
@@ -50,7 +65,15 @@ from app.agents.l1_identity import create_l1_identity_agent
 from app.agents.l2_eligibility import create_l2_eligibility_agent
 from app.agents.l3_level import create_l3_level_agent
 from app.agents.l4_timeline import create_l4_timeline_agent
-from app.agents.schemas import TimelineResult
+from app.agents.l5_synthesizer import (
+    STATE_KEY_FINAL_RECOMMENDATION,
+    create_l5_synthesizer_agent,
+)
+from app.agents.schemas import (
+    IdentityProfile,
+    RecommendationResponse,
+    TimelineResult,
+)
 from app.ranking import rank_timeline_entries
 
 logger = logging.getLogger(__name__)
@@ -82,6 +105,14 @@ STATE_KEY_RANKED_TIMELINE = "ranked_timeline"
 # ignores the timeline path — the ranker short-circuits the entire
 # downstream chain to a single LLM call (L1 only).
 STATE_KEY_FINAL_USER_RESPONSE = "final_user_response"
+# Written by an L-layer's ``after_agent_callback`` when that layer's
+# structured output contains a non-None ``ask_back`` field. Holds the
+# user-facing clarification question. Subsequent ``before_agent_callback``s
+# read this key and skip their agent (zero LLM calls), so the pipeline
+# halts cleanly. ``run_lumi_query`` returns the string verbatim.
+# (Lifted from per-schema fields into a flat key so all downstream
+# callbacks can read one source of truth.)
+STATE_KEY_ASK_BACK = "ask_back"
 
 # Fallback apology used only when L1 marks the query out_of_scope but
 # fails to populate the ``apology`` field. Kept here (not in the L1
@@ -91,6 +122,16 @@ DEFAULT_OUT_OF_SCOPE_APOLOGY = (
     "I'm Lumi, a guide for free AI/ML learning resources. "
     "Your question looks outside that scope — try asking about AI, "
     "ML, or learning resources and I'll be glad to help."
+)
+
+# Fallback used when an L-layer fires ``ask_back`` but the field is
+# empty / whitespace-only. Mirrors ``DEFAULT_OUT_OF_SCOPE_APOLOGY`` —
+# defensive default so a malformed L-layer output never produces
+# silent failures.
+DEFAULT_ASK_BACK_FALLBACK = (
+    "Could you share a bit more about your background and what you'd "
+    "like to learn? I can tailor recommendations better with more "
+    "context."
 )
 
 
@@ -127,9 +168,42 @@ def _coerce_timeline(value: Any) -> TimelineResult | None:
     return None
 
 
+def _coerce_identity(value: Any) -> IdentityProfile | None:
+    """Coerce a session-state value back to :class:`IdentityProfile`.
+
+    ADK 2.2.0 stores structured ``output_schema`` payloads as plain
+    ``dict`` in session state (the ``CallbackContext.state`` view
+    shows them as dicts, not typed models). A future ADK version may
+    deliver typed Pydantic models instead. This helper handles both
+    shapes — same pattern as :func:`_coerce_timeline` and
+    :func:`_coerce_recommendation`.
+
+    Accepts:
+    - ``IdentityProfile`` instance → returned as-is.
+    - ``dict`` matching the schema → validated into IdentityProfile.
+    - Anything else → ``None`` (caller falls back to legacy always-run).
+
+    Returns ``None`` on validation failure rather than raising so a
+    single bad layer doesn't bring down the whole pipeline.
+    """
+    if isinstance(value, IdentityProfile):
+        return value
+    if isinstance(value, dict):
+        try:
+            return IdentityProfile.model_validate(value)
+        except Exception:  # fallback only — see docstring above
+            logger.warning(
+                "skip callback: failed to coerce dict to IdentityProfile",
+                exc_info=True,
+            )
+            return None
+    return None
+
+
 def _make_should_i_run_callback(agent_name: str):
     """Build a ``before_agent_callback`` that skips ``agent_name`` when
-    it is not listed in ``state['identity']['target_agents']``.
+    it is not listed in ``state['identity']['target_agents']`` OR when
+    an earlier L-layer has already fired ``ask_back``.
 
     The skip mechanism is the structural implementation of L1's routing
     decision (see :class:`app.agents.l1_identity._L1_INSTRUCTION` part B
@@ -139,11 +213,18 @@ def _make_should_i_run_callback(agent_name: str):
     :class:`Content` so ADK's runner treats the sub-agent as a no-op
     — zero LLM calls, zero MCP tool calls.
 
+    The ``ask_back`` short-circuit is layered on top: if any earlier
+    L-layer's ``after_agent_callback`` wrote
+    ``state[STATE_KEY_ASK_BACK]``, all subsequent ``before_agent_callback``s
+    skip their agent. This avoids wasting LLM calls on layers that
+    would never reach the user (the ask_back string is the final
+    reply).
+
     Args:
         agent_name: The sub-agent's ``name=`` (must match one of the
             values in ``IdentityProfile.target_agents``, e.g.
             ``"l2_eligibility"``, ``"l3_level"``, ``"l4_timeline"``,
-            or ``"timeline_ranker"``).
+            ``"timeline_ranker"``, or ``"l5_synthesizer"``).
 
     Returns:
         An async-compatible callable suitable for ADK
@@ -157,15 +238,25 @@ def _make_should_i_run_callback(agent_name: str):
             # No state — be conservative and run the agent. We don't
             # want a missing state to silently bypass the pipeline.
             return None
-        identity_raw = state.get(STATE_KEY_IDENTITY)
-        # L1 may not have written identity yet (e.g. very early abort).
-        # In that case, let the agent run — the worst case is the old
+
+        # Ask-back short-circuit: if any earlier L-layer (L2/L3/L4)
+        # fired ask_back, skip this agent entirely. The question is
+        # the final reply; no LLM calls downstream are warranted.
+        if state.get(STATE_KEY_ASK_BACK):
+            logger.debug(
+                "skipping %s: ask_back already pending in state",
+                agent_name,
+            )
+            return genai_types.Content(role="model", parts=[])
+
+        identity = _coerce_identity(state.get(STATE_KEY_IDENTITY))
+        # L1 may not have written identity yet (e.g. very early abort),
+        # or the stored value may not be a valid IdentityProfile. In any
+        # such case, let the agent run — the worst case is the old
         # always-run behavior, never a silent skip.
-        if not isinstance(identity_raw, dict):
+        if identity is None:
             return None
-        target_agents = identity_raw.get("target_agents")
-        if not isinstance(target_agents, list):
-            return None
+        target_agents = identity.target_agents
         if agent_name in target_agents:
             return None  # run normally
         # Skip: emit an empty Content so ADK treats the agent as done.
@@ -173,11 +264,81 @@ def _make_should_i_run_callback(agent_name: str):
             "skipping %s: not in target_agents=%s (L1 intent=%s)",
             agent_name,
             target_agents,
-            identity_raw.get("intent"),
+            identity.intent,
         )
         return genai_types.Content(role="model", parts=[])
 
     return _before_agent
+
+
+def _make_ask_back_after_agent_callback(layer_output_key: str):
+    """Build an ``after_agent_callback`` that lifts ``ask_back`` from
+    a layer's structured output into the flat ``state['ask_back']`` key.
+
+    Pattern is parallel to :func:`_make_should_i_run_callback`: a
+    factory that closes over the per-layer output_key. The callback
+    runs after the L-layer's LLM call completes. If the structured
+    output (which ADK persists to ``state[layer_output_key]``) has a
+    non-empty ``ask_back`` field, the callback:
+
+    1. Writes the string to ``state[STATE_KEY_ASK_BACK]`` so the
+       next ``before_agent_callback`` (for the layer below this one)
+       skips that layer.
+    2. Returns ``Content(role="model", parts=[Part(text=ask_back)])``
+       so the CLI prints the question as that layer's user-visible
+       turn.
+
+    If ``ask_back`` is None or empty, the callback returns empty
+    ``Content`` and the layer's success path emits no user-visible
+    text (only its structured JSON dump, which is the current
+    behavior).
+
+    Args:
+        layer_output_key: The session-state key where the L-layer's
+            structured ``output_schema`` payload is written (e.g.
+            ``"eligibility"``, ``"level_filter"``, ``"timeline"``).
+
+    Returns:
+        An ``after_agent_callback`` suitable for ADK
+        ``LlmAgent.after_agent_callback``.
+    """
+
+    def _after_agent(callback_context: Any) -> genai_types.Content:
+        state = getattr(callback_context, "state", None)
+        if state is None:
+            return genai_types.Content(role="model", parts=[])
+
+        layer_value = state.get(layer_output_key)
+        if layer_value is None:
+            return genai_types.Content(role="model", parts=[])
+
+        # Defensive: ADK may deliver a typed Pydantic model or a plain
+        # dict depending on version. Try attribute access first (covers
+        # typed models), fall back to .get() (covers dicts).
+        ask_back: str | None = None
+        if hasattr(layer_value, "ask_back"):
+            ask_back = getattr(layer_value, "ask_back", None)
+        elif isinstance(layer_value, dict):
+            ask_back = layer_value.get("ask_back")
+
+        if not isinstance(ask_back, str) or not ask_back.strip():
+            return genai_types.Content(role="model", parts=[])
+
+        # Defensive fallback: never let an empty / whitespace-only
+        # ask_back collapse the pipeline to silence.
+        text = ask_back.strip() or DEFAULT_ASK_BACK_FALLBACK
+        state[STATE_KEY_ASK_BACK] = text
+        logger.debug(
+            "%s callback: ask_back set, short-circuiting pipeline",
+            layer_output_key,
+        )
+        # Surface the question as the layer's user-visible turn.
+        return genai_types.Content(
+            role="model",
+            parts=[genai_types.Part(text=text)],
+        )
+
+    return _after_agent
 
 
 def _build_ranker_agent(
@@ -242,9 +403,9 @@ def _rank_after_agent(
     # been skipped by their before_agent_callbacks. We surface L1's
     # apology as the final response and skip the ranking step entirely,
     # so the entire pipeline costs exactly 1 LLM call (L1).
-    identity_raw = state.get(STATE_KEY_IDENTITY)
-    if isinstance(identity_raw, dict) and identity_raw.get("out_of_scope"):
-        apology = identity_raw.get("apology")
+    identity = _coerce_identity(state.get(STATE_KEY_IDENTITY))
+    if identity is not None and identity.out_of_scope:
+        apology = identity.apology
         # Defensive fallback: never let a missing apology collapse the
         # pipeline to an empty user reply. The L1 prompt requires the
         # field, but we don't want a schema bug to surface as silence.
@@ -328,17 +489,38 @@ def create_lumi_pipeline(
         create_l2_eligibility_agent(
             model=model,
             before_agent_callback=_make_should_i_run_callback("l2_eligibility"),
+            after_agent_callback=_make_ask_back_after_agent_callback(
+                STATE_KEY_ELIGIBILITY
+            ),
         ),
         create_l3_level_agent(
             model=model,
             before_agent_callback=_make_should_i_run_callback("l3_level"),
+            after_agent_callback=_make_ask_back_after_agent_callback(
+                STATE_KEY_LEVEL_FILTER
+            ),
         ),
         create_l4_timeline_agent(
             model=model,
             before_agent_callback=_make_should_i_run_callback("l4_timeline"),
+            after_agent_callback=_make_ask_back_after_agent_callback(
+                STATE_KEY_TIMELINE
+            ),
         ),
         _build_ranker_agent(
             before_agent_callback=_make_should_i_run_callback("timeline_ranker"),
+        ),
+        # L5 Synthesizer — final layer that turns ranked_timeline into
+        # a user-facing markdown recommendation. Skipped automatically
+        # when ask_back is pending (handled by the shared
+        # _make_should_i_run_callback). Its after_agent_callback
+        # (default in create_l5_synthesizer_agent) surfaces the
+        # markdown as user-visible text and falls back to a
+        # code-rendered summary if L5's structured output fails
+        # validation.
+        create_l5_synthesizer_agent(
+            model=model,
+            before_agent_callback=_make_should_i_run_callback("l5_synthesizer"),
         ),
     ]
     return SequentialAgent(
@@ -347,7 +529,9 @@ def create_lumi_pipeline(
     )
 
 
-async def run_lumi_query(query: str) -> TimelineResult | str:
+async def run_lumi_query(
+    query: str,
+) -> TimelineResult | RecommendationResponse | str:
     """Run a single query through the full Lumi pipeline.
 
     Convenience wrapper for the most common caller pattern: build
@@ -360,23 +544,42 @@ async def run_lumi_query(query: str) -> TimelineResult | str:
     state. L1's prompt reads it from the conversation context, so
     this is the cleanest path that keeps L1 tool-free.
 
+    Short-circuit order (first match wins):
+
+    1. ``state['ask_back']`` — set by an L-layer's
+       ``after_agent_callback`` when that layer's structured output
+       contains a non-empty ``ask_back`` field. Returns the
+       clarification question as a ``str``.
+    2. ``state['final_user_response']`` — set by the ranker callback
+       when L1 marked the query as ``out_of_scope``. Returns the
+       apology as a ``str``.
+    3. ``state['final_recommendation']`` — set by L5's ``output_key``.
+       Returns a :class:`RecommendationResponse`.
+    4. ``state['ranked_timeline']`` — set by the ranker's
+       ``after_agent_callback``. Returns a :class:`TimelineResult`.
+    5. ``state['timeline']`` — fallback for callers that ran only the
+       first 4 layers. Returns a :class:`TimelineResult` (sorted).
+    6. Empty :class:`TimelineResult()` — last-resort default so
+       callers always receive a structured payload.
+
     Args:
         query: The user's free-text request (e.g. ``"I'm a CS
             undergrad in Brazil, want to learn LLMs"``).
 
     Returns:
-        Either:
-        - A :class:`TimelineResult` (the normal ranked-recommendation
-          payload) when the query is about AI/ML learning, OR
+        One of:
+        - A :class:`TimelineResult` (the structured ranked list) when
+          no final recommendation was synthesized (e.g. L5 was
+          skipped, or fell back to timeline-only).
+        - A :class:`RecommendationResponse` (markdown + language +
+          follow-up) on the happy in-scope path.
         - A ``str`` apology when L1 classified the query as
-          ``out_of_scope`` (e.g. "plan me a Tokyo trip"). In that
-          case every downstream agent was skipped and the pipeline
-          cost exactly 1 LLM call (L1 only).
+          ``out_of_scope``, OR a ``str`` clarification question when
+          an L-layer fired ``ask_back``.
 
-        If the in-scope path errored partway and never wrote
-        ``state['timeline']``, an empty :class:`TimelineResult` is
-        returned so in-scope callers always receive a structured
-        payload.
+        The ``str`` variants are discriminated by content (apology
+        vs. question) — callers that need to distinguish should
+        check ``state`` directly via ``Runner.run_async``.
     """
     pipeline = create_lumi_pipeline()
     session_service = InMemorySessionService()
@@ -403,8 +606,8 @@ async def run_lumi_query(query: str) -> TimelineResult | str:
         parts=[genai_types.Part(text=query)],
     )
 
-    # Drain the runner's async generator so the post-callback (ranker)
-    # actually fires. We do not consume individual events here —
+    # Drain the runner's async generator so the post-callbacks (ranker
+    # + L5) actually fire. We do not consume individual events here —
     # callers that need per-layer traces should use ``Runner.run_async``
     # directly.
     async for _event in runner.run_async(
@@ -421,31 +624,47 @@ async def run_lumi_query(query: str) -> TimelineResult | str:
     )
     state = final_session.state if final_session is not None else {}
 
-    # Out-of-scope short-circuit (Task 63): the ranker callback writes
-    # ``state['final_user_response']`` when L1 marked the query as not
-    # about AI/ML learning. Return the apology string verbatim and
-    # skip the timeline-path below — keeps the contract narrow so
-    # callers can ``isinstance(result, str)`` to detect OOS replies.
+    # 1. Ask-back short-circuit: an L-layer (L2/L3/L4) couldn't
+    # proceed without more user input. Return the question as a
+    # plain ``str`` — same shape as the OOS apology for caller
+    # convenience.
+    ask_back = state.get(STATE_KEY_ASK_BACK)
+    if isinstance(ask_back, str) and ask_back.strip():
+        return ask_back
+
+    # 2. Out-of-scope apology short-circuit.
     final_response = state.get(STATE_KEY_FINAL_USER_RESPONSE)
     if isinstance(final_response, str) and final_response.strip():
         return final_response
 
-    # Prefer the post-ranker output if the callback fired, otherwise
-    # fall back to the L4 output so callers still get a structured
-    # payload if ranking was skipped (e.g. L4 returned an empty
-    # timeline and the ranker was a no-op).
-    #
-    # ADK 2.2.0 serializes structured ``output_schema`` payloads to
-    # plain ``dict`` before writing them to session state (the
-    # ``CallbackContext.state`` view shows them as dicts). We coerce
-    # back to the typed model so downstream code (``rank_timeline_entries``,
-    # tests, the FastAPI handler) always sees the contract type.
+    # 3. L5 recommendation (preferred on the happy path).
+    rec = state.get(STATE_KEY_FINAL_RECOMMENDATION)
+    if isinstance(rec, RecommendationResponse):
+        return rec
+    if isinstance(rec, dict):
+        try:
+            return RecommendationResponse.model_validate(rec)
+        except Exception:
+            # Validation failed — fall through to the timeline
+            # path below so callers still get a structured reply.
+            logger.warning(
+                "run_lumi_query: state['final_recommendation'] "
+                "failed validation, falling back to timeline",
+                exc_info=True,
+            )
+
+    # 4. Ranker output (post-sort TimelineResult).
     ranked = state.get(STATE_KEY_RANKED_TIMELINE)
     ranked = _coerce_timeline(ranked)
     if ranked is not None:
         return ranked
+
+    # 5. Raw L4 output (unsorted fallback for callers that ran only
+    # the first 4 layers).
     raw = state.get(STATE_KEY_TIMELINE)
     raw = _coerce_timeline(raw)
     if raw is not None:
         return rank_timeline_entries(raw)
+
+    # 6. Empty TimelineResult last-resort.
     return TimelineResult()

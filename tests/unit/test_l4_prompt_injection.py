@@ -1047,8 +1047,10 @@ def test_l4_schemas_reject_unexpected_fields_on_levelfilter() -> None:
     )
     assert l3.user_level is SkillLevel.BEGINNER
     # Extra fields are silently dropped, not echoed.
+    # ``ask_back`` is a known schema field (orchestrator short-circuit
+    # primitive) so it stays in the dump.
     dumped = l3.model_dump()
-    assert set(dumped.keys()) == {"matches", "user_level", "reasoning"}
+    assert set(dumped.keys()) == {"matches", "user_level", "reasoning", "ask_back"}
 
 
 # ── 18. Education-level spoofing (downstream of L4) ──────────────────

@@ -197,4 +197,39 @@ def test_classify_within_90_days_is_medium() -> None:
 
 def test_classify_beyond_90_days_is_low() -> None:
     assert classify_days_until_deadline(91) is Urgency.LOW
+
+
+# ─── ask_back field (CONTEXT.md #22) ────────────────────────────────────
+
+
+def test_timeline_result_accepts_ask_back() -> None:
+    """``TimelineResult`` accepts a string ``ask_back`` field."""
+
+    result = TimelineResult(
+        ranked=[],
+        today="2026-06-21",
+        reasoning="no time-sensitive matches",
+        ask_back="could you broaden the topic?",
+    )
+    assert result.ask_back == "could you broaden the topic?"
+
+
+def test_timeline_result_ask_back_max_length_500() -> None:
+    """A 501-char ``ask_back`` raises ``ValidationError`` (CONTEXT.md #22)."""
+
+    too_long = "q" * 501
+    with pytest.raises(ValidationError):
+        TimelineResult(
+            ranked=[],
+            today="2026-06-21",
+            reasoning="empty",
+            ask_back=too_long,
+        )
+
+
+def test_timeline_result_ask_back_defaults_to_none() -> None:
+    """``ask_back`` defaults to ``None`` when not supplied."""
+
+    result = TimelineResult()
+    assert result.ask_back is None
     assert classify_days_until_deadline(365) is Urgency.LOW

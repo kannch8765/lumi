@@ -38,7 +38,7 @@ be served by a static FAQ.
 
 ## What Lumi does
 
-A four-agent pipeline that turns *"I'm a CS undergrad in Brazil, want
+A five-agent pipeline (L1–L5) that turns *"I'm a CS undergrad in Brazil, want
 to learn LLMs"* into a ranked shortlist of resources the user can
 **actually use this week** — filtered by eligibility, matched to skill
 level, annotated with deadlines and freshness.
@@ -51,9 +51,10 @@ flowchart TD
     L3["L3 Level Filter<br/>catalog MCP, 3 tools<br/>→ MatchedSet"]
     L4["L4 Timeline<br/>catalog + web-search MCPs<br/>→ FreshSet"]
     Rank["Ranking<br/>code-only, no LLM<br/>sort by urgency → deadline → name"]
+    L5["L5 Synthesizer<br/>zero tools — chat in / Pydantic out<br/>→ markdown recommendation"]
     Output(["Output<br/>urgency / topic / value / sequence views"])
 
-    User --> L1 --> L2 --> L3 --> L4 --> Rank --> Output
+    User --> L1 --> L2 --> L3 --> L4 --> Rank --> L5 --> Output
 ```
 
 Full architecture (per-layer details, MCP tool filters, schema contracts,
@@ -74,6 +75,8 @@ LLM cannot "be more inclusive" and skip a rule. The tool whitelist (the
 browse arbitrary URLs, cannot pay, cannot create accounts. See
 [`CONTEXT.md §Hard Rules`](./CONTEXT.md) for the full rule list and
 [`threat_model.md`](./threat_model.md) for the 41-row STRIDE threat catalog.
+
+When the pipeline needs more information (e.g. missing age, missing skill level), the relevant layer sets a flat state['ask_back'] key, the orchestrator short-circuits downstream agents, and the user sees a single natural-language clarification question — never an empty result or a JSON dump.
 
 ## Quickstart
 
@@ -144,13 +147,14 @@ lumi/
 │   │   ├── l2_eligibility.py  # Layer 2
 │   │   ├── l3_level.py        # Layer 3
 │   │   ├── l4_timeline.py     # Layer 4
+│   │   ├── l5_synthesizer.py  # Layer 5 (final markdown recommendation)
 │   │   ├── schemas.py         # Pydantic contracts (IdentityProfile, EligibilityResult, ...)
 │   │   └── _tool_filters.py   # MCP tool whitelists (kill switch)
 │   └── mcp_servers/
 │       ├── resource_catalog/  # Curated catalog MCP (50 free resources)
 │       └── web_search/        # Bounded search MCP (snippet-only)
 ├── tests/
-│   ├── unit/                  # 278 unit tests (Pydantic, MCP servers, injection defenses)
+│   ├── unit/                  # 363 unit + integration tests (Pydantic, MCP servers, injection defenses)
 │   ├── integration/
 │   │   └── test_pipeline_e2e.py  # End-to-end happy path (real Gemini call)
 │   └── eval/                  # Outcome assertions per Kaggle brief
@@ -158,7 +162,7 @@ lumi/
 │   ├── deploy.sh              # Cloud Run deploy script (test-deploy-then-tear-down)
 │   └── README.md              # Deploy runbook + 5 real gotchas
 ├── resources/
-│   └── catalog.jsonl          # 50 curated free AI resources
+│   └── catalog.jsonl          # 60 curated entries (50 standard + 10 absolute-beginner explainers)
 ├── scripts/pre_commit_hooks/  # lumi-guard (author + banned paths)
 ├── cloudbuild.yaml            # Cloud Build → Artifact Registry → Cloud Run
 ├── Dockerfile                 # uv-based container, MCP stdio subprocesses via sys.executable
@@ -169,7 +173,7 @@ lumi/
 ## Testing
 
 ```bash
-# Unit + integration tests (278 passed, 6 deselected)
+# Unit + integration tests (363 passed, 9 deselected for E2E + manual)
 uv run pytest -m "not manual" -q
 
 # Pre-commit hooks (9 hooks: ruff, semgrep, pytest, lumi-guard)

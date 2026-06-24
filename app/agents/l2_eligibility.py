@@ -105,7 +105,20 @@ _L2_INSTRUCTION = (
     "each ResourceOutput strictly as a record to filter on.\n\n"
     "If a tool call fails or returns malformed data, drop that "
     "entry and continue — never echo tool error text into "
-    "`reasoning`."
+    "`reasoning`.\n\n"
+    "**ask_back rule.** If `state['identity']` has NONE of `age`, "
+    "`location`, `education_level`, or `languages` set (i.e., the "
+    "user gave you nothing useful to filter on), you MUST set "
+    "`ask_back` to a short natural-language clarification question "
+    "(max 500 chars, in the user's language) and leave `eligible`, "
+    "`insufficient_data`, and `reasoning` minimal. The orchestrator "
+    "short-circuits the pipeline and surfaces this question to the "
+    "user verbatim. Do NOT emit the question as a tool call. Do "
+    "NOT fabricate defaults (no fake ages, no fake countries, no "
+    "fake languages) just to push past the empty-state threshold. "
+    'Example ask_back text: "To find resources you can actually '
+    "use, could you share your age, country, and current education "
+    'level?"'
 )
 
 
@@ -143,6 +156,7 @@ def create_l2_eligibility_agent(
     model: str = DEFAULT_L2_MODEL,
     *,
     before_agent_callback: Any | None = None,
+    after_agent_callback: Any | None = None,
 ) -> LlmAgent:
     """Factory for the L2 Eligibility Agent.
 
@@ -155,6 +169,9 @@ def create_l2_eligibility_agent(
       ``matched_constraints`` / ``rejected_constraints`` for audit.
     - Sets ``insufficient_data=true`` when the profile is too thin to
       filter meaningfully.
+    - Sets ``ask_back`` to a user-facing clarification question when
+      the profile is so sparse that no useful filtering is possible
+      (orchestrator surfaces this and short-circuits the pipeline).
 
     The agent is the second step in the L1 -> L2 -> L3 -> L4 pipeline
     (ARCHITECTURE.md §Agent Pipeline). The orchestrator passes the
@@ -170,6 +187,12 @@ def create_l2_eligibility_agent(
             orchestrator can skip L2 in O(0 LLM calls) when L1's
             routing decision excludes it (e.g. ``intent=filter_only``
             or ``intent=out_of_scope``). When None, L2 always runs.
+        after_agent_callback: Optional ADK ``after_agent_callback``.
+            The orchestrator wires a callback that lifts
+            ``EligibilityResult.ask_back`` (if set) into the flat
+            ``state['ask_back']`` key and returns the question as
+            user-visible text. Pass ``None`` to disable ask-back
+            behavior (testing only).
     """
     tools = [_build_resource_catalog_toolset()]
 
@@ -181,4 +204,5 @@ def create_l2_eligibility_agent(
         output_schema=EligibilityResult,
         output_key="eligibility",
         before_agent_callback=before_agent_callback,
+        after_agent_callback=after_agent_callback,
     )

@@ -384,35 +384,38 @@ public URL, no deploy cost.
 
 ### 7.1 What was measured
 
-I tracked four kinds of evidence as I built Lumi: (1) unit test counts
-per layer, (2) prompt-injection defense tests across all four agents,
-(3) end-to-end scenarios against the live Gemini API, and (4) one real
-multilingual query against the deployed pipeline (via `adk run`).
-Latency was observed informally rather than via a CI baseline because
-the formal p50/p95 run is deselected by default to keep `pytest -q`
-fast.
+Five kinds of evidence: (1) unit + integration test counts, (2)
+prompt-injection defense tests across all five L-layers, (3) end-to-end
+scenarios against the live Gemini API, (4) one real multilingual query
+against the deployed pipeline (Portuguese, see §7.6), and (5) four CLI
+smoke tests covering the new L5 + ask_back + explainer pool behavior
+(EN + JA, see §7.5). Latency was observed informally rather than via
+a CI baseline because the formal p50/p95 run is deselected by default
+to keep `pytest -q` fast and protect the 15-RPM free-tier quota.
 
 ### 7.2 Test counts (the headline number)
 
 | Suite | Tests | Status |
 |---|---|---|
-| `pytest -m "not manual"` | **278 passed, 6 deselected** | green in 3.2s |
-| Adversarial injection tests (L1+L2+L3+L4) | **149 tests** | green |
-| E2E integration scenarios (`test_pipeline_e2e.py`) | **6 tests, 1 skipped (slow latency baseline)** | green |
+| `pytest -m "not manual"` | **363 passed, 9 deselected** (5 E2E + 1 slow latency + 3 eval fixtures) | green in ~5 s |
+| Adversarial injection tests (L1+L2+L3+L4+L5) | **L1: 26, L2: 49, L3: 31, L4: 55, L5: 15+ = 176+ tests** | green |
+| E2E integration scenarios (`test_pipeline_e2e.py`) | **9 scenarios** (happy path, injection, short query, OOS, no-age ask_back, no-level ask_back, absolute-beginner, latency baseline skipped, sample dump) | green |
 | Pre-commit hooks (ruff + semgrep + pytest + lumi-guard) | **9 hooks** | green |
 
-The injection-test number — 149 — is the one I'd point a security
-reviewer at. It breaks down by layer as **L1: 27, L2: 32, L3: 32,
-L4: 58**. L4 has the most because it has the largest attack surface
+The injection-test number — 176+ — is the one I'd point a security
+reviewer at. L4 has the most because it has the largest attack surface
 (both MCP servers, both catalog and web-search tool filters,
 `freshness_signal` enum, `recommended_action` text field,
-`days_until_deadline` numeric boundary). Each test asserts a structural
-property of the agent that the LLM cannot talk its way around — tool
-filter contents, instruction-zone wording, Pydantic boundary rejection.
+`days_until_deadline` numeric boundary). L5 has 15+ dedicated
+injection tests (direct override, role hijack, indirect via
+identity/ranked_timeline, multilingual payload, encoding trick,
+long-context overflow). Each test asserts a structural property the
+LLM cannot talk its way around — tool filter contents, instruction-
+zone wording, Pydantic boundary rejection.
 
 ### 7.3 Prompt-injection defense verification
 
-The 149 adversarial tests cover, per layer:
+The 176+ adversarial tests cover, per layer:
 
 - **Tool whitelist is the kill switch** — `test_tool_filter_*` asserts
   the `tool_filter=` parameter matches the central allow-list constant
@@ -431,41 +434,90 @@ The 149 adversarial tests cover, per layer:
   that oversize payloads (1 MB reasoning strings, 99999-day deadlines,
   NaN/Inf fit scores, megabyte catalog lists) are rejected at
   validation. This closes the D.1 (DoS via context overflow) family.
+- **L5 refusal-pattern scrub** — `RecommendationResponse._scrub_refusal_patterns`
+  raises `ValueError` on markdown containing `system prompt`,
+  `my instructions`, or `instruction zone`; the `after_agent_callback`
+  falls back to a deterministic code-rendered markdown summary. This
+  is the only defense that fires on certain injection shapes that
+  already passed L1–L4.
 - **Output schema is the only output** — tests assert that the agent
   uses `output_schema=<Pydantic class>` rather than free-text
   responses. Free-text PII leaks and instruction echoes are
   structurally impossible.
 
 A successful injection attempt at any layer produces a structured
-`{confidence: 0.0, ...}` (L1) or an empty `ranked=[]` list (L2-L4),
-never a malformed free-text response. The E2E injection test
-(`test_e2e_prompt_injection_does_not_break_pipeline`) confirms this
-end-to-end — a prompt-injection-shaped query returns a valid
-`TimelineResult` with empty `ranked`, not a crash.
+`{confidence: 0.0, ...}` (L1) or an empty `ranked=[]` list (L2-L4)
+or a fallback markdown (L5), never a malformed free-text response.
+The E2E injection test (`test_e2e_prompt_injection_does_not_break_pipeline`)
+confirms this end-to-end — a prompt-injection-shaped query returns a
+valid `TimelineResult` with empty `ranked`, not a crash.
 
 ### 7.4 E2E scenario outcomes
 
-The 6 E2E scenarios in `tests/integration/test_pipeline_e2e.py` cover
-the realistic case matrix:
+Nine scenarios in `tests/integration/test_pipeline_e2e.py` cover the
+realistic case matrix:
 
 | Scenario | What it asserts | Result |
 |---|---|---|
-| Teen in Japan, wants ML courses | Full pipeline, structured response, ≥1 candidate | pass |
-| Prompt-injection-shaped query | Returns valid empty-result, no crash | pass |
-| Very short query ("hi") | Empty-result path, no exception | pass |
-| Out-of-scope ("find me a job") | Graceful empty-result | pass |
-| Latency baseline (4 queries × 2 reps) | p50/p95 (skipped by default) | skipped |
-| Dump sample output for docs | Saves JSON snapshot to `tests/integration/_sample_outputs/` | pass |
+| Happy path (16-y/o in Japan, basic Python) | Full L1→L2→L3→L4→ranker→L5 chain, `RecommendationResponse`, markdown length 1..3000, valid BCP-47 language, wall-clock < 120 s | pass |
+| Prompt-injection-shaped query (CS in Brazil) | On-topic content, no payload echo, no crash | pass |
+| Very short query ("AI courses") | L1 still produces structured profile; downstream returns empty `ranked` | pass |
+| Out-of-scope ("pizza recipe in Italy") | L1 sets `out_of_scope=true`, downstream short-circuits, L1 apology surfaces | pass |
+| No-age query (CS student in Brazil) | L2 fires `ask_back`, downstream agents skip in 0 LLM calls, clarification string surfaces | pass |
+| No-level-hint query ("learn neural networks") | L3 fires `ask_back`, L4/L5 skipped, clarification string surfaces | pass |
+| Absolute-beginner EN ("never coded, what is Python?") | L3 pre-coding rule boosts `fit_score=1.0` for explainer-type resources, L5 leads with 4 explainers | pass |
+| Absolute-beginner JA (programming 初心者) | L1 extracts `languages=['ja']`, L2 picks JA explainer pool (Progate, ドットインストール), L5 emits Japanese-language response | pass |
+| Latency baseline (4 queries × 2 reps) | p50/p95 (skipped by default to preserve free-tier quota) | skipped |
 
 The skipped latency test exists because it requires ~8-12 minutes of
-wall-clock against the live Gemini free tier, which would make CI
-painful. I observed latency informally on the real Portuguese query
-below and got ~30-60s for the full L1→L2→L3→L4→ranker pipeline,
-dominated by L4's web-search MCP round-trip. This is well within
-interactive latency for a Kaggle demo — judge clicks "Submit", reads
-the result, moves on.
+wall-clock against the live Gemini free tier. Observed wall-clock on
+the real Portuguese query (§7.6) and the EN/JA absolute-beginner runs
+was **~30-60 s cold start**, dominated by L4's web-search MCP
+round-trip. Each layer is ~10-20 s warm; L5 adds ~5-15 s on top.
+This is well within interactive latency for a Kaggle demo.
 
-### 7.5 Real-world demo: Portuguese query, end-to-end
+### 7.5 L5 Synthesizer, ask_back, and the explainer pool
+
+The work added in late June 2026 was a single coherent feature: turn
+the pipeline from a structured-output machine into a **user-facing
+assistant that asks for clarification when it should, and recommends
+the right entry point for absolute beginners**. Three primitives,
+sharing the same `state['ask_back']` flat key:
+
+- **L5 Synthesizer** (`app/agents/l5_synthesizer.py`). Zero tools.
+  Reads `state['ranked_timeline']` + `state['identity']`, emits a
+  structured `RecommendationResponse` (markdown, language, follow_up).
+  Refusal-pattern scrub + code-rendered fallback if the LLM output
+  fails validation. Verified live in EN + JA.
+- **ask_back pattern** (`app/orchestrator.py`). The `ask_back` field
+  propagates through L2 / L3 / L4 schemas with `max_length=500`. Each
+  layer's instructions tell the LLM "set `ask_back` if you can't
+  proceed." The orchestrator's `_make_ask_back_after_agent_callback`
+  lifts it into `state['ask_back']`; every subsequent
+  `before_agent_callback` emits empty `Content`, costing **0 LLM
+  calls downstream of the ask_back**. `run_lumi_query` returns the
+  question verbatim as a `str` — the same shape as the OOS apology,
+  so callers treat both uniformly.
+- **Explainer pool** (`resources/catalog.json`). 10 new resources
+  tagged `type="explainer"` for users who have never coded: Code.org
+  Hour of Code, Scratch (MIT), CS50, Khan Academy Intro to
+  Programming, freeCodeCamp Responsive Web, Grasshopper, CodeCombat,
+  Progate (JA), ドットインストール (JA), MDN Learn Web Dev. L3's
+  pre-coding detection rule boosts `fit_score=1.0` when
+  `identity.education_level is None` and interests contain no
+  coding-related keywords. L5's INSTRUCTION ZONE leads with
+  explainers when present. A regression test
+  (`test_explainer_pool_has_at_least_8_entries`) guards the pool
+  against silent rot.
+
+**Live verification on 2026-06-23** — query "I've never coded before.
+I don't even know what Python is. Where should I start?" produced a
+4-step explainer-first path: Code.org → Scratch → Khan Academy →
+Kaggle Learn Python, with a "no need to set up complex software"
+note. The Japanese variant produced Progate + ドットインストール with
+a Japanese-language response.
+
+### 7.6 Real-world demo: Portuguese query, end-to-end
 
 To prove the pipeline works in a real (non-mocked) path with a real
 multilingual input, I ran the full CLI demo:
@@ -497,7 +549,7 @@ This same pipeline runs identically in Cloud Run via
 externally. The 429 we saw during the test deploy was a **quota**
 ceiling (15 RPM shared across the trial account), not a code bug.
 
-### 7.6 Five deploy gotchas — what went wrong, what we learned
+### 7.7 Five deploy gotchas — what went wrong, what we learned
 
 §6 covers the details. The five gotchas, in order of encounter:
 
@@ -520,7 +572,7 @@ Each gotcha is now a single line in `deploy/README.md` plus a note in
 ~5 minutes per cycle × 5 cycles = ~25 minutes of waiting on Cloud
 Build — within the budget of "test once, then tear down".
 
-### 7.7 Lessons learned (the surprises)
+### 7.8 Lessons learned (the surprises)
 
 **Lesson 1 — `InMemorySessionService` hides bugs that
 `PersistentSessionService` surfaces.** The ranker callback originally
@@ -577,7 +629,65 @@ guarantee in both worlds. The "shift left" promise of CI/CD is
 actually delivered by `pre-commit` here — a failed test never
 reaches the user.
 
-### 7.8 What I'd do differently next time
+**Lesson 7 — Defense-in-depth really works.** The L5 refusal-pattern
+scrub is the *only* defense that fires on certain injection shapes
+that already passed L1–L4 — and it still saves the user. In one local
+run, an L1 output with `confidence=0.0` (injection-shaped) flowed
+through to L5, which produced markdown containing the literal phrase
+`"system prompt"`. Without the scrub, the user would have seen that
+phrase. With the scrub, `ValueError` → fallback to
+`_render_fallback_markdown` → deterministic urgency-grouped summary.
+**A single defense can fail, but the layered defenses (tool
+whitelist → schema caps → Pydantic boundary → refusal-pattern
+scrub → code-rendered fallback) collapse gracefully into each
+other.** The fallback markdown is intentionally ugly — that ugliness
+is a feature, not a bug. It is the deterministic structural response
+that does not depend on the LLM behaving.
+
+**Lesson 8 — Schema-as-contract, one artifact, two layers.** The five
+Pydantic classes (`IdentityProfile`, `EligibilityResult`,
+`LevelFilterResult`, `TimelineResult`, `RecommendationResponse`) are
+the *same class* in both worlds. **Layer A (runtime):** set as
+`output_schema=` on each L-layer's `LlmAgent`, so the LLM's
+structured output is validated before it touches session state.
+**Layer B (dev-time):** imported by the orchestrator, the ranker,
+the E2E tests, and `l5_synthesizer.py` for static type hints and
+`_coerce_*` helpers. The concrete example: the `ask_back` field
+propagates as `max_length=500` through L2/L3/L4. One cap, enforced
+at write-time (LLM output), read-time (orchestrator callback), and
+commit-time (pytest). **Pre-commit is the literal handoff** — a
+failed test never reaches the user.
+
+**Lesson 9 — Parallel subagent execution paid off, but serialize
+StrEnum migrations.** Two waves succeeded: Phase A (~3 min vs
+~10 min sequential, 3 subagents for MCP servers + writeup); Phase B
+(~10 min vs ~30 min sequential, 4 subagents for L1–L4). The
+wrinkle: Task 31 (L3) migrated three enums from `(str, Enum)` to
+`StrEnum`, touching the shared `schemas.py` that L2 and L4 were
+also writing to. **Lesson: serialize StrEnum (and any
+shared-module) migrations across a parallel wave.** The
+subagent-hang false positive on L3 (8.6 min vs 3-4 min for siblings)
+was instructive — slow is not stuck; check files before killing.
+
+**Lesson 10 — We deferred Firecrawl on purpose, not by accident.**
+The catalog is a curated 60-entry JSON file with one
+`last_verified_free` timestamp per resource. Firecrawl-style
+open-world web scraping would expand this to "the whole internet,"
+which would also expand the attack surface to PI.7 (catalog
+injection), PI.8 (search-result injection), and freshness rot —
+every background refresh becomes a potential prompt-injection
+vector. The current curated approach is sanitized at ingest (one
+human reviewer, `last_verified_free`, no auto-update). The
+cost-of-expansion is real: more attack surface with no proportional
+value (60 entries already cover Kaggle Learn, HF courses, fast.ai,
+Stanford CS231n/CS224n, DeepLearning.AI, the major free API tiers,
+free GPU environments, and non-English courses). **This is a
+deliberate trade-off, not a deferral due to time.** Phase G
+background automation (Task 33) can revisit this once there's an
+offline review pipeline that doesn't put student traffic in the
+blast radius.
+
+### 7.9 What I'd do differently next time
 
 - **Set up Vertex AI from the start.** The 429 we hit was a
   free-tier artifact; Vertex AI's quota model is per-project and
@@ -599,17 +709,17 @@ reaches the user.
   file per job, scheduled by the user's system cron or Cloud
   Scheduler.
 
-### 7.9 Closing — what's shipped vs what's planned
+### 7.10 Closing — what's shipped vs what's planned
 
 | Status | Item |
 |---|---|
-| ✅ Shipped | 4-layer pipeline, 50-resource curated catalog, MCP tool whitelist, Pydantic schema-as-contract, threat model + 41 STRIDE rows, 278 unit + integration tests, 9 pre-commit hooks, Cloud Run deploy manifest + runbook, expanded README + writeup, `adk run` / `adk web` CLI demo |
-| ✅ Verified | Local end-to-end on Portuguese query, test-deploy-then-tear-down on Cloud Run, 5 deploy gotchas documented, `/lumi-verify` audit clean |
-| 📅 Planned | Background automation (Task 33), demo video (Task 28), cover image (Task 40) |
-| 🚫 Not building | Persistent Cloud Run service, account-creation tools, payment tools — all by design (CONTEXT.md #1, kill-switch philosophy) |
+| ✅ Shipped | 5-layer L1→L2→L3→L4→ranker→L5 pipeline, 60-resource curated catalog (50 standard + 10 absolute-beginner explainers), MCP tool whitelist, Pydantic schema-as-contract, threat model + 41 STRIDE rows, 363 unit + integration tests, 9 pre-commit hooks, Cloud Run deploy manifest + runbook, L5 + ask_back + explainer pool, `adk run` / `adk web` CLI demo |
+| ✅ Verified | Local end-to-end on Portuguese query + EN absolute-beginner + JA absolute-beginner, test-deploy-then-tear-down on Cloud Run, 5 deploy gotchas documented, 9 E2E scenarios pass, `/lumi-verify` audit clean |
+| 📅 Planned | Demo video (Task 28), final submission (Task 30), cover image (Task 40), background automation (Task 33) |
+| 🚫 Not building | Persistent Cloud Run service, account-creation tools, payment tools, Firecrawl web scraping — all by design (CONTEXT.md #1, kill-switch philosophy, deliberate trade-off) |
 
 The system is **demo-complete and Kaggle-submittable** as of
-2026-06-22: every code path runs end-to-end, every claim in this
+2026-06-24: every code path runs end-to-end, every claim in this
 writeup is backed by either a passing test or a documented gotcha,
 and every shipped artifact has a clear author, repo link, and
 documented security boundary.

@@ -45,6 +45,7 @@ from app.orchestrator import (
     STATE_KEY_FINAL_USER_RESPONSE,
     STATE_KEY_IDENTITY,
     STATE_KEY_RANKED_TIMELINE,
+    _coerce_identity,
     _make_should_i_run_callback,
     _rank_after_agent,
     create_lumi_pipeline,
@@ -67,10 +68,14 @@ def test_identity_profile_default_intent_is_full_pipeline() -> None:
 
 
 def test_identity_profile_default_target_agents_runs_everything() -> None:
-    """Default ``target_agents`` lists every downstream agent.
+    """Default ``target_agents`` for a fresh ``IdentityProfile`` lists
+    every L-layer agent (the L1 → L2 → L3 → L4 → ranker chain).
 
-    With the default in place, the legacy always-run pipeline
-    keeps working even when no router field is set.
+    Note: ``target_agents`` is now derived from ``intent`` by the
+    ``_derive_target_agents_from_intent`` validator. The default
+    ``intent`` is ``"full_pipeline"`` whose mapping is the 4-agent
+    chain (l5_synthesizer is intentionally excluded — it's wired
+    separately in the orchestrator, not via the skip mechanism).
     """
     profile = IdentityProfile(raw_query="hello")
     assert set(profile.target_agents) == {
@@ -179,16 +184,22 @@ def test_should_i_run_callback_returns_none_when_targeted() -> None:
 
 def test_should_i_run_callback_returns_empty_content_when_not_targeted() -> None:
     """The callback returns an empty ``Content`` (= skip) when the
-    agent is NOT in ``target_agents``. Zero LLM calls."""
-    ctx = _FakeCallbackContext(
-        state={
-            STATE_KEY_IDENTITY: {
-                "intent": "freshness_check",
-                # freshness_check skips L2 + L3, runs L4 + ranker only.
-                "target_agents": ["l4_timeline", "timeline_ranker"],
-            }
-        }
+    agent is NOT in ``target_agents``. Zero LLM calls.
+
+    Uses a real ``IdentityProfile`` (typed state) since the orchestrator
+    now coerces state['identity'] via ``_coerce_identity`` which
+    requires a valid IdentityProfile (raw_query etc.). The validator
+    derives ``target_agents`` from intent, so we set
+    ``intent="freshness_check"`` to test the freshness_check skip path.
+    """
+    profile = IdentityProfile(
+        raw_query="is the Kaggle one still free?",
+        intent="freshness_check",  # type: ignore[arg-type]
     )
+    # Validator derives target_agents from intent (freshness_check).
+    assert profile.target_agents == ["l4_timeline", "timeline_ranker"]
+
+    ctx = _FakeCallbackContext(state={STATE_KEY_IDENTITY: profile})
     callback = _make_should_i_run_callback("l2_eligibility")
     result = asyncio.run(callback(ctx))
     assert isinstance(result, genai_types.Content)
@@ -288,10 +299,12 @@ def test_rank_after_agent_writes_apology_when_out_of_scope() -> None:
     skips the ranking step entirely."""
     ctx = _FakeCallbackContext(
         state={
-            STATE_KEY_IDENTITY: {
-                "out_of_scope": True,
-                "apology": "Lumi only handles AI/ML learning — please rephrase.",
-            }
+            STATE_KEY_IDENTITY: IdentityProfile(
+                raw_query="plan me a Tokyo trip",
+                intent="out_of_scope",  # type: ignore[arg-type]
+                out_of_scope=True,
+                apology="Lumi only handles AI/ML learning — please rephrase.",
+            )
         }
     )
     # ``_rank_after_agent`` is a sync callback (ADK calls it directly,
@@ -313,7 +326,14 @@ def test_rank_after_agent_falls_back_to_default_apology_when_missing() -> None:
     :data:`DEFAULT_OUT_OF_SCOPE_APOLOGY` so the user always gets
     a reply."""
     ctx = _FakeCallbackContext(
-        state={STATE_KEY_IDENTITY: {"out_of_scope": True, "apology": None}}
+        state={
+            STATE_KEY_IDENTITY: IdentityProfile(
+                raw_query="plan me a Tokyo trip",
+                intent="out_of_scope",  # type: ignore[arg-type]
+                out_of_scope=True,
+                apology=None,
+            )
+        }
     )
     _rank_after_agent(ctx)
     assert ctx.state[STATE_KEY_FINAL_USER_RESPONSE] == DEFAULT_OUT_OF_SCOPE_APOLOGY
@@ -357,36 +377,154 @@ def test_intent_to_target_agents_mapping(
     intent: str, expected_agents: set[str]
 ) -> None:
     """The L1 prompt documents the intent → target_agents mapping.
-    Lock it in at the schema level so a regression in the prompt
-    is caught by the test suite.
 
-    Note: this asserts the SHAPE the L1 prompt asks for, not
-    L1's actual output (that requires a live model + golden
-    suite — covered in ``test_pipeline_e2e.py``).
+    Since the IdentityProfile.model_validator recomputes target_agents
+    from intent (single source of truth — see Task #9 plan), this test
+    now asserts the validator's output for each intent rather than the
+    static mapping literal. A regression in the validator or the
+    routing constants is caught here.
     """
-    target_agents_by_intent = {
-        "full_pipeline": [
-            "l2_eligibility",
-            "l3_level",
-            "l4_timeline",
-            "timeline_ranker",
-        ],
-        "filter_only": ["l3_level", "l4_timeline", "timeline_ranker"],
-        "freshness_check": ["l4_timeline", "timeline_ranker"],
-        "drill_down": ["timeline_ranker"],
-        "out_of_scope": [],
-    }
-    assert set(target_agents_by_intent[intent]) == expected_agents
+    profile = IdentityProfile(raw_query="hello", intent=intent)  # type: ignore[arg-type]
+    assert set(profile.target_agents) == expected_agents
 
 
 # ── Public surface ─────────────────────────────────────────────────────
 
 
 def test_run_lumi_query_returns_timeline_or_str() -> None:
-    """``run_lumi_query`` returns ``TimelineResult | str``.
+    """``run_lumi_query`` returns ``TimelineResult | RecommendationResponse | str``.
 
     The union is the API contract — callers ``isinstance``-check
-    to decide which path to render.
+    to decide which path to render. ``RecommendationResponse`` was
+    added when L5 (Synthesizer) was wired in; ``str`` covers both
+    the out-of-scope apology and the ask-back clarification path.
     """
     sig = inspect.signature(run_lumi_query)
-    assert sig.return_annotation == "TimelineResult | str"
+    assert sig.return_annotation == ("TimelineResult | RecommendationResponse | str")
+
+
+# ── Validator behavior (Task #9 — intent routing fix) ──────────────────
+
+
+@pytest.mark.parametrize(
+    "intent",
+    ["full_pipeline", "filter_only", "freshness_check", "drill_down", "out_of_scope"],
+)
+def test_validator_derives_target_agents_for_all_five_intents(intent: str) -> None:
+    """For each intent, the IdentityProfile validator produces the
+    canonical target_agents list — regardless of what L1 emits.
+
+    The validator (``IdentityProfile._derive_target_agents_from_intent``)
+    is the single source of truth for the intent → target_agents
+    mapping. This test pins down the contract for all 5 intents.
+    """
+    from app.routing import INTENT_TO_TARGET_AGENTS, LUMI_AGENT_NAMES
+
+    profile = IdentityProfile(raw_query="hello", intent=intent)  # type: ignore[arg-type]
+    expected = INTENT_TO_TARGET_AGENTS.get(intent, list(LUMI_AGENT_NAMES))
+    assert profile.target_agents == expected
+
+
+def test_validator_overrides_incorrect_target_agents() -> None:
+    """Even if L1 emits target_agents=all_5 with intent='drill_down',
+    the validator narrows it to ['timeline_ranker'].
+
+    This is the bug class: L1 prompt tells the model to set
+    target_agents per intent, but Gemini 3.1 Flash Lite is
+    inconsistent for non-OOS intents. The validator makes that
+    inconsistency irrelevant.
+    """
+    from app.routing import LUMI_AGENT_NAMES
+
+    profile = IdentityProfile(
+        raw_query="tell me more about fast.ai",
+        intent="drill_down",  # type: ignore[arg-type]
+        target_agents=list(LUMI_AGENT_NAMES),  # WRONG input — validator must override
+    )
+    assert profile.target_agents == ["timeline_ranker"]
+
+
+# ── _coerce_identity helper ─────────────────────────────────────────────
+
+
+def test_coerce_identity_accepts_typed_identityprofile() -> None:
+    """_coerce_identity(IdentityProfile_instance) returns the same instance."""
+    profile = IdentityProfile(raw_query="hi", intent="full_pipeline")
+    result = _coerce_identity(profile)
+    assert result is profile  # exact identity, no copy
+
+
+def test_coerce_identity_accepts_valid_dict() -> None:
+    """_coerce_identity({valid dict}) returns a validated IdentityProfile."""
+    payload = {
+        "raw_query": "I am a CS undergrad in Brazil, want to learn LLMs",
+        "intent": "full_pipeline",
+        "target_agents": [
+            "l2_eligibility",
+            "l3_level",
+            "l4_timeline",
+            "timeline_ranker",
+        ],
+    }
+    result = _coerce_identity(payload)
+    assert isinstance(result, IdentityProfile)
+    assert result.intent == "full_pipeline"
+    assert result.raw_query == payload["raw_query"]
+
+
+def test_coerce_identity_returns_none_for_invalid_dict() -> None:
+    """_coerce_identity({garbage}) returns None and logs a warning.
+
+    The helper must NOT raise — a single bad layer must not bring
+    down the whole pipeline. (Same contract as _coerce_timeline.)
+    """
+    result = _coerce_identity({"not_a_real_field": "wat", "intent": 99999})
+    assert result is None
+
+
+def test_coerce_identity_returns_none_for_wrong_type() -> None:
+    """_coerce_identity(non-dict, non-IdentityProfile) returns None.
+
+    Defensive: protects against an unexpected state value (e.g. a
+    string or int accidentally written to state['identity']).
+    """
+    assert _coerce_identity(42) is None
+    assert _coerce_identity("not a profile") is None
+    assert _coerce_identity(None) is None
+
+
+# ── Skip callback with typed state (the bug-class test) ────────────────
+
+
+def test_should_i_run_callback_skips_with_typed_identity_state() -> None:
+    """A typed IdentityProfile in state drives the skip decision
+    correctly — this is the test that proves the Pydantic-model
+    delivery path works (previously the failing path).
+    """
+    # freshness_check: skip L2 + L3, run L4 + ranker
+    profile = IdentityProfile(
+        raw_query="is kaggle still free?", intent="freshness_check"
+    )
+    ctx = _FakeCallbackContext(state={STATE_KEY_IDENTITY: profile})
+
+    # L2 should be SKIPPED
+    l2_cb = _make_should_i_run_callback("l2_eligibility")
+    l2_result = asyncio.run(l2_cb(ctx))
+    assert isinstance(l2_result, genai_types.Content)
+    assert l2_result.parts == []  # empty = skip
+
+    # L4 should RUN
+    l4_cb = _make_should_i_run_callback("l4_timeline")
+    l4_result = asyncio.run(l4_cb(ctx))
+    assert l4_result is None  # None = run
+
+
+def test_should_i_run_callback_falls_back_to_run_when_coercion_fails() -> None:
+    """When state['identity'] is unparseable, the callback returns
+    None (run normally) — preserves the legacy always-run contract
+    so a transient bad state never silently skips an agent.
+    """
+    ctx = _FakeCallbackContext(state={STATE_KEY_IDENTITY: {"garbage": True}})
+    callback = _make_should_i_run_callback("l2_eligibility")
+    result = asyncio.run(callback(ctx))
+    assert result is None  # run normally, never a silent skip

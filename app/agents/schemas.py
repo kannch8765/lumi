@@ -18,15 +18,17 @@ from datetime import date, timedelta
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.mcp_servers.resource_catalog.schemas import ResourceOutput
+from app.routing import LUMI_AGENT_NAMES
 
 # ─── L1 router intent types ────────────────────────────────────────────
 
 # Names of the L-layer agents in the pipeline. Used as values for
-# IdentityProfile.target_agents. Keep in sync with app/orchestrator.py.
-_LUMI_AGENT_NAMES = ("l2_eligibility", "l3_level", "l4_timeline", "timeline_ranker")
+# IdentityProfile.target_agents. Re-exported from app.routing for
+# back-compat with callers that import the underscore-prefixed name.
+_LUMI_AGENT_NAMES = LUMI_AGENT_NAMES
 
 # The 5 routing intents L1 can emit. Each intent maps to a specific
 # target_agents list (see IdentityProfile.target_agents default_factory).
@@ -122,9 +124,38 @@ class IdentityProfile(BaseModel):
     raw_query: str = Field(min_length=1, max_length=2000)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     intent: LumiIntent = "full_pipeline"
-    target_agents: list[str] = Field(default_factory=lambda: list(_LUMI_AGENT_NAMES))
+    # Recomputed by ``_derive_target_agents_from_intent`` validator below;
+    # the default is the full agent list (full_pipeline behavior) but any
+    # non-full_pipeline intent overrides it. Never trust the L1-emitted
+    # value directly — always read after validation.
+    target_agents: list[str] = Field(default_factory=lambda: list(LUMI_AGENT_NAMES))
     out_of_scope: bool = False
     apology: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def _derive_target_agents_from_intent(self) -> IdentityProfile:
+        """Always recompute target_agents from intent (single source of truth).
+
+        L1's prompt instructs it to populate target_agents per intent, but
+        Gemini 3.1 Flash Lite is inconsistent for non-OOS intents — it
+        sometimes leaves target_agents at the default (all 5 agents),
+        which defeats the orchestrator's skip mechanism. This validator
+        treats intent as the single source of truth and overrides any
+        target_agents the LLM wrote.
+
+        Falls back to DEFAULT_TARGET_AGENTS for unknown intents (shouldn't
+        happen — the LumiIntent Literal blocks it at parse time, but
+        defense in depth).
+        """
+        # Local import to avoid circular-import risk if app.routing ever
+        # needs to import from app.agents.schemas.
+        from app.routing import DEFAULT_TARGET_AGENTS, INTENT_TO_TARGET_AGENTS
+
+        self.target_agents = INTENT_TO_TARGET_AGENTS.get(
+            self.intent,
+            DEFAULT_TARGET_AGENTS,
+        )
+        return self
 
 
 # ─── L2 Eligibility output ─────────────────────────────────────────────
@@ -160,6 +191,16 @@ class EligibilityResult(BaseModel):
     eligible: list[EligibleResource] = Field(default_factory=list, max_length=50)
     insufficient_data: bool = False
     reasoning: str = Field(max_length=1000)
+    # ``ask_back`` is a user-facing clarification question. When the
+    # L2 layer detects that ``identity`` is too sparse to filter
+    # meaningfully (no age, no location, no education_level, no
+    # language), it sets this field instead of producing speculative
+    # matches. The orchestrator's ``after_agent_callback`` lifts the
+    # string into ``state['ask_back']`` so downstream layers (L3/L4/L5)
+    # skip themselves and ``run_lumi_query`` returns the question to
+    # the caller verbatim. Capped at 500 chars (CONTEXT.md #22) —
+    # same budget as ``IdentityProfile.apology``.
+    ask_back: str | None = Field(default=None, max_length=500)
 
 
 # ─── L3 Level Filter output ────────────────────────────────────────────
@@ -218,6 +259,11 @@ class LevelFilterResult(BaseModel):
     matches: list[LevelMatch] = Field(default_factory=list, max_length=50)
     user_level: SkillLevel | None = None
     reasoning: str = Field(default="", max_length=1000)
+    # ``ask_back``: L3's user-facing clarification question. When L3
+    # cannot infer the user's skill level (no education_level, no
+    # goal hint), it sets this field. The orchestrator lifts it into
+    # ``state['ask_back']`` and skips downstream layers.
+    ask_back: str | None = Field(default=None, max_length=500)
 
 
 # ─── L4 Timeline output ────────────────────────────────────────────────
@@ -277,6 +323,85 @@ class TimelineResult(BaseModel):
     # up to a length cap.
     today: str = Field(default_factory=lambda: date.today().isoformat(), max_length=10)
     reasoning: str = Field(default="", max_length=1000)
+    # ``ask_back``: L4's user-facing clarification question. When L4
+    # finds no time-sensitive free resources (or the catalog returned
+    # zero candidates), it asks the user to broaden the search. Lifted
+    # into ``state['ask_back']`` by the orchestrator.
+    ask_back: str | None = Field(default=None, max_length=500)
+
+
+# ─── L5 Synthesizer output ─────────────────────────────────────────────
+
+
+# Refusal-pattern strings that must never appear in user-facing agent
+# output (CONTEXT.md #19 — "no echo of system prompts"). The validator
+# on ``RecommendationResponse.markdown`` rejects any string containing
+# any of these substrings (case-insensitive).
+_REFUSAL_PATTERNS = (
+    "system prompt",
+    "my instructions",
+    "instruction zone",
+)
+
+
+class RecommendationResponse(BaseModel):
+    """L5's structured output — the final user-facing recommendation.
+
+    L5 reads the sorted timeline (``state['ranked_timeline']``) plus
+    the user's identity profile (``state['identity']``) and emits a
+    natural-language markdown reply, grouped by urgency, with one line
+    per resource. This schema is the L5 / ADK boundary contract — the
+    CLI and FastAPI surfaces render the ``markdown`` field directly.
+
+    Security guards (CONTEXT.md #18-22, threat_model.md):
+
+    * ``markdown`` is bounded to 3000 chars (DoS via context overflow).
+    * A refusal-pattern scrub (see ``_REFUSAL_PATTERNS``) rejects any
+      string containing "system prompt", "my instructions", or
+      "instruction zone" — case-insensitive. Defense against the L5
+      LLM echoing its own INSTRUCTION zone into the user reply.
+    * ``follow_up`` is optional (a single suggested next question) and
+      capped at 200 chars.
+    * ``language`` is an ISO 639-1 code, capped at 10 chars (allows
+      BCP-47 subtags like ``pt-BR``).
+
+    Attributes:
+        markdown: Natural-language user-facing recommendation. Plain
+            text / markdown only — no HTML, no JS, no executable
+            content.
+        language: ISO 639-1 (or BCP-47) language code for the reply.
+            Drives client-side rendering (e.g., selecting a voice for
+            TTS). Defaults to ``"en"``.
+        follow_up: Optional single-sentence follow-up question to
+            prompt the user into a follow-up turn (e.g., "Want me to
+            filter by deadline?"). ``None`` means L5 has no natural
+            follow-up.
+    """
+
+    markdown: str = Field(min_length=1, max_length=3000)
+    language: str = Field(default="en", min_length=2, max_length=10)
+    follow_up: str | None = Field(default=None, max_length=200)
+
+    @field_validator("markdown")
+    @classmethod
+    def _scrub_refusal_patterns(cls, v: str) -> str:
+        """Reject strings that echo INSTRUCTION-zone content (CONTEXT.md #19).
+
+        Case-insensitive substring match against ``_REFUSAL_PATTERNS``.
+        Raises ``ValueError`` so Pydantic surfaces the violation as a
+        schema validation failure — the L5 ``after_agent_callback``
+        catches the failure and falls back to a code-rendered
+        recommendation built directly from
+        ``state['ranked_timeline']``.
+        """
+        lowered = v.lower()
+        for needle in _REFUSAL_PATTERNS:
+            if needle in lowered:
+                raise ValueError(
+                    f"markdown contains forbidden phrase '{needle}' "
+                    "(CONTEXT.md #19: do not echo instruction zone)"
+                )
+        return v
 
 
 # ─── Heuristics for code-side urgency classification ────────────────────

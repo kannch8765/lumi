@@ -30,7 +30,7 @@ import time
 
 import pytest
 
-from app.agents.schemas import TimelineEntry, TimelineResult
+from app.agents.schemas import RecommendationResponse, TimelineEntry, TimelineResult
 from app.orchestrator import run_lumi_query
 
 # Skip the entire module if no API key — keeps CI green.
@@ -251,3 +251,168 @@ async def test_e2e_dump_sample_output_for_docs() -> None:
     )
     print(f"\n[DEBUG] Sample output written to {out_path}")
     # Always passes — this is a documentation helper.
+
+
+# ─── L5 Synthesizer E2E tests ───────────────────────────────────────────
+
+
+def _assert_valid_recommendation(result: RecommendationResponse) -> None:
+    """Sanity-check a RecommendationResponse regardless of LLM non-determinism."""
+
+    assert isinstance(result, RecommendationResponse)
+    # markdown: min_length=1, max_length=3000.
+    assert 1 <= len(result.markdown) <= 3000
+    # language: min_length=2, max_length=10 (BCP-47).
+    assert 2 <= len(result.language) <= 10
+    # follow_up is optional, but bounded if present.
+    if result.follow_up is not None:
+        assert 1 <= len(result.follow_up) <= 200
+
+
+async def test_e2e_happy_path_teen_japan_returns_recommendation() -> None:
+    """Happy path: 16-year-old in Japan wants free AI courses.
+
+    Expect: pipeline runs through L5 Synthesizer and returns a
+    ``RecommendationResponse`` with non-empty markdown. Latency budget
+    is 120s (L5 adds ~5-15s on top of the L1→L4 path).
+    """
+
+    t0 = time.perf_counter()
+    result = await run_lumi_query(HAPPY_PATH_QUERY)
+    latency = time.perf_counter() - t0
+
+    assert isinstance(result, RecommendationResponse), (
+        f"Expected RecommendationResponse, got {type(result).__name__}: "
+        f"{str(result)[:200]!r}"
+    )
+    _assert_valid_recommendation(result)
+    assert latency < 120.0, f"Pipeline took {latency:.1f}s, expected <120s"
+
+    print(
+        f"\n[L5 HAPPY PATH] latency={latency:.1f}s, "
+        f"markdown_len={len(result.markdown)}, language={result.language!r}"
+    )
+    print(f"  Markdown snippet: {result.markdown[:150]!r}")
+
+
+async def test_e2e_no_age_triggers_l2_ask_back() -> None:
+    """Query with no age, no location, no education → L2 fires ask_back.
+
+    The orchestrator returns the ask_back string as ``str`` (same
+    shape as the OOS apology). We expect a non-empty string.
+    """
+
+    result = await run_lumi_query(
+        "I'm a CS student in Brazil, want to learn LLMs for free"
+    )
+
+    assert isinstance(result, str), (
+        f"Expected str (ask_back), got {type(result).__name__}"
+    )
+    assert len(result) > 0, "ask_back string should not be empty"
+    print(f"\n[L2 ASK_BACK] {result[:200]!r}")
+
+
+async def test_e2e_no_level_hint_triggers_l3_ask_back() -> None:
+    """Query with no level hint (no education, no goal) → L3 fires ask_back.
+
+    Expect a non-empty string returned from ``run_lumi_query``.
+    """
+
+    result = await run_lumi_query("I want to learn about neural networks")
+
+    assert isinstance(result, str), (
+        f"Expected str (ask_back), got {type(result).__name__}"
+    )
+    assert len(result) > 0, "ask_back string should not be empty"
+    print(f"\n[L3 ASK_BACK] {result[:200]!r}")
+
+
+# ─── Task #9 — non-OOS intent routing e2e ──────────────────────────────
+
+
+async def test_e2e_filter_only_skips_l2() -> None:
+    """filter_only intent should skip L2 (no catalog search).
+
+    Probe 1 (happy-path) seeds the latency baseline. Probe 2
+    (filter_only follow-up) should be meaningfully faster because
+    the L2 catalog search is skipped.
+
+    Heuristic latency check — free-tier Gemini variance can produce
+    outliers, so the threshold is loose (<70% of baseline).
+    """
+    t0 = time.perf_counter()
+    baseline = await run_lumi_query(HAPPY_PATH_QUERY)
+    baseline_latency = time.perf_counter() - t0
+
+    _assert_valid_timeline(baseline)  # type: ignore[arg-type]
+
+    t0 = time.perf_counter()
+    filtered = await run_lumi_query("from those, only the beginner-level courses")
+    filter_latency = time.perf_counter() - t0
+
+    _assert_valid_timeline(filtered)  # type: ignore[arg-type]
+    assert filter_latency < baseline_latency * 0.70, (
+        f"filter_only latency ({filter_latency:.1f}s) should be <70% of "
+        f"baseline ({baseline_latency:.1f}s) — L2 was probably not skipped"
+    )
+    print(
+        f"\n[FILTER_ONLY] baseline={baseline_latency:.1f}s, "
+        f"filter={filter_latency:.1f}s "
+        f"({100 * filter_latency / baseline_latency:.0f}% of baseline)"
+    )
+
+
+async def test_e2e_freshness_check_skips_l2_and_l3() -> None:
+    """freshness_check intent should skip L2 + L3.
+
+    Follow-up like "is the Kaggle one still free?" should be faster
+    than the happy-path baseline because L2 (catalog search) and L3
+    (level match) are both skipped.
+    """
+    t0 = time.perf_counter()
+    baseline = await run_lumi_query(HAPPY_PATH_QUERY)
+    baseline_latency = time.perf_counter() - t0
+
+    _assert_valid_timeline(baseline)  # type: ignore[arg-type]
+
+    t0 = time.perf_counter()
+    fresh = await run_lumi_query("is the Kaggle one still free today?")
+    fresh_latency = time.perf_counter() - t0
+
+    _assert_valid_timeline(fresh)  # type: ignore[arg-type]
+    assert fresh_latency < baseline_latency * 0.70, (
+        f"freshness_check latency ({fresh_latency:.1f}s) should be <70% "
+        f"of baseline ({baseline_latency:.1f}s) — L2/L3 probably not skipped"
+    )
+    print(
+        f"\n[FRESHNESS] baseline={baseline_latency:.1f}s, "
+        f"fresh={fresh_latency:.1f}s "
+        f"({100 * fresh_latency / baseline_latency:.0f}% of baseline)"
+    )
+
+
+async def test_e2e_drill_down_only_runs_ranker() -> None:
+    """drill_down intent should skip L2 + L3 + L4, just run ranker (+ L5).
+
+    Follow-up like "tell me more about fast.ai" should be the fastest
+    of the three non-OOS intents because most layers are skipped.
+    """
+    t0 = time.perf_counter()
+    baseline = await run_lumi_query(HAPPY_PATH_QUERY)
+    baseline_latency = time.perf_counter() - t0
+
+    _assert_valid_timeline(baseline)  # type: ignore[arg-type]
+
+    t0 = time.perf_counter()
+    detail = await run_lumi_query("tell me more about fast.ai")
+    detail_latency = time.perf_counter() - t0
+
+    # drill_down may return a RecommendationResponse (L5 detail) or
+    # a TimelineResult — both are valid for the router's intent.
+    assert detail is not None
+    print(
+        f"\n[DRILL_DOWN] baseline={baseline_latency:.1f}s, "
+        f"detail={detail_latency:.1f}s "
+        f"({100 * detail_latency / baseline_latency:.0f}% of baseline)"
+    )
