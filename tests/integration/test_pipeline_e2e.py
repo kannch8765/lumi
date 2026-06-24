@@ -25,6 +25,7 @@ Wall-clock budget: ~2-5 min for the full suite on Flash Lite free tier.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 
@@ -42,6 +43,72 @@ pytestmark = [
         reason="GEMINI_API_KEY not set — E2E test needs real LLM",
     ),
 ]
+
+
+# ─── Pacing (Task #3) ────────────────────────────────────────────────────
+# Free-tier Gemini allows 15 RPM. After 5 LLM calls per query, the next
+# test would otherwise start ~1s after the previous one finishes — well
+# inside the 60s RPM window. Sleep 60s between tests so the per-minute
+# quota has room to recover.
+_TEST_SPACING_SECONDS = 60.0
+
+
+@pytest.fixture(autouse=True)
+async def _pace_between_tests():
+    """Sleep ``_TEST_SPACING_SECONDS`` between consecutive tests."""
+    yield
+    print(f"\n[pace] sleeping {_TEST_SPACING_SECONDS:.0f}s before next test")
+    await asyncio.sleep(_TEST_SPACING_SECONDS)
+
+
+# ─── Retry helper (Task #3) ──────────────────────────────────────────────
+# Free-tier Gemini allows 15 RPM. Sequential L1→L2→L3→L4→L5 means 5 LLM
+# calls per query; back-to-back e2e tests easily exceed quota and trip
+# transient 429 RESOURCE_EXHAUSTED. Wrap each ``run_lumi_query`` call with
+# ``_run_with_retry`` to absorb the backoff transparently.
+
+from google.genai.errors import ClientError as _GeminiClientError  # noqa: E402
+
+
+async def _run_with_retry(coro_factory, max_retries: int = 3, base_delay: float = 30.0):
+    """Run an async coroutine factory with exponential backoff on 429.
+
+    ``coro_factory`` is a zero-arg callable that returns a fresh coroutine on
+    each call (so retries actually re-issue the LLM request rather than
+    re-awaiting an already-consumed coroutine). On ``ClientError`` whose
+    stringified form contains ``"429"`` or ``"RESOURCE_EXHAUSTED"``, sleep
+    for ``base_delay * 2**attempt`` seconds before retrying, up to
+    ``max_retries`` times. Any other exception propagates immediately.
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            return await coro_factory()
+        except _GeminiClientError as exc:
+            msg = str(exc)
+            if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+                if attempt == max_retries:
+                    raise
+                delay = base_delay * (2**attempt)
+                print(
+                    f"  [retry {attempt + 1}/{max_retries}] 429 RESOURCE_EXHAUSTED, "
+                    f"sleeping {delay:.0f}s"
+                )
+                await asyncio.sleep(delay)
+            else:
+                raise
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            msg = str(exc)
+            if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+                if attempt == max_retries:
+                    raise
+                delay = base_delay * (2**attempt)
+                print(
+                    f"  [retry {attempt + 1}/{max_retries}] 429 RESOURCE_EXHAUSTED, "
+                    f"sleeping {delay:.0f}s"
+                )
+                await asyncio.sleep(delay)
+            else:
+                raise
 
 
 # ─── Representative queries ───────────────────────────────────────────────
@@ -108,7 +175,7 @@ async def test_e2e_happy_path_teen_japan() -> None:
     backoffs (free tier allows 15 RPM, 250K TPM).
     """
     t0 = time.perf_counter()
-    result = await run_lumi_query(HAPPY_PATH_QUERY)
+    result = await _run_with_retry(lambda: run_lumi_query(HAPPY_PATH_QUERY))
     latency = time.perf_counter() - t0
 
     _assert_valid_timeline(result)
@@ -139,7 +206,7 @@ async def test_e2e_prompt_injection_does_not_break_pipeline() -> None:
     The injection payload should NOT appear verbatim in any output
     field.
     """
-    result = await run_lumi_query(INJECTION_QUERY)
+    result = await _run_with_retry(lambda: run_lumi_query(INJECTION_QUERY))
 
     _assert_valid_timeline(result)
     # The pipeline should have output something on-topic, not a refusal.
@@ -170,7 +237,7 @@ async def test_e2e_edge_case_very_short_query() -> None:
     Expect: pipeline still produces a structured result. Should not
     crash on minimal context, should not produce an empty result.
     """
-    result = await run_lumi_query(EDGE_SHORT_QUERY)
+    result = await _run_with_retry(lambda: run_lumi_query(EDGE_SHORT_QUERY))
 
     _assert_valid_timeline(result)
     # Even with a 2-word query, we expect at least the system to
@@ -192,7 +259,7 @@ async def test_e2e_out_of_scope_returns_gracefully() -> None:
 
     Either way, output must be a valid TimelineResult, not an error.
     """
-    result = await run_lumi_query(OUT_OF_SCOPE_QUERY)
+    result = await _run_with_retry(lambda: run_lumi_query(OUT_OF_SCOPE_QUERY))
 
     _assert_valid_timeline(result)
     # The output is allowed to be empty (refusal) or non-empty (redirect).
@@ -214,7 +281,7 @@ async def test_e2e_latency_baseline() -> None:
     timings: list[float] = []
     for _i in range(8):
         t0 = time.perf_counter()
-        result = await run_lumi_query(HAPPY_PATH_QUERY)
+        result = await _run_with_retry(lambda: run_lumi_query(HAPPY_PATH_QUERY))
         timings.append(time.perf_counter() - t0)
         _assert_valid_timeline(result)
     timings.sort()
@@ -238,7 +305,7 @@ async def test_e2e_dump_sample_output_for_docs() -> None:
     Not a real test — just a way to capture a real LLM output for
     documentation. Pass automatically.
     """
-    result = await run_lumi_query(HAPPY_PATH_QUERY)
+    result = await _run_with_retry(lambda: run_lumi_query(HAPPY_PATH_QUERY))
     _assert_valid_timeline(result)
     # Save to a temp file for the writeup author to copy from.
     import json
@@ -278,7 +345,7 @@ async def test_e2e_happy_path_teen_japan_returns_recommendation() -> None:
     """
 
     t0 = time.perf_counter()
-    result = await run_lumi_query(HAPPY_PATH_QUERY)
+    result = await _run_with_retry(lambda: run_lumi_query(HAPPY_PATH_QUERY))
     latency = time.perf_counter() - t0
 
     assert isinstance(result, RecommendationResponse), (
@@ -302,8 +369,10 @@ async def test_e2e_no_age_triggers_l2_ask_back() -> None:
     shape as the OOS apology). We expect a non-empty string.
     """
 
-    result = await run_lumi_query(
-        "I'm a CS student in Brazil, want to learn LLMs for free"
+    result = await _run_with_retry(
+        lambda: run_lumi_query(
+            "I'm a CS student in Brazil, want to learn LLMs for free"
+        )
     )
 
     assert isinstance(result, str), (
@@ -319,7 +388,9 @@ async def test_e2e_no_level_hint_triggers_l3_ask_back() -> None:
     Expect a non-empty string returned from ``run_lumi_query``.
     """
 
-    result = await run_lumi_query("I want to learn about neural networks")
+    result = await _run_with_retry(
+        lambda: run_lumi_query("I want to learn about neural networks")
+    )
 
     assert isinstance(result, str), (
         f"Expected str (ask_back), got {type(result).__name__}"
@@ -342,13 +413,15 @@ async def test_e2e_filter_only_skips_l2() -> None:
     outliers, so the threshold is loose (<70% of baseline).
     """
     t0 = time.perf_counter()
-    baseline = await run_lumi_query(HAPPY_PATH_QUERY)
+    baseline = await _run_with_retry(lambda: run_lumi_query(HAPPY_PATH_QUERY))
     baseline_latency = time.perf_counter() - t0
 
     _assert_valid_timeline(baseline)  # type: ignore[arg-type]
 
     t0 = time.perf_counter()
-    filtered = await run_lumi_query("from those, only the beginner-level courses")
+    filtered = await _run_with_retry(
+        lambda: run_lumi_query("from those, only the beginner-level courses")
+    )
     filter_latency = time.perf_counter() - t0
 
     _assert_valid_timeline(filtered)  # type: ignore[arg-type]
@@ -371,13 +444,15 @@ async def test_e2e_freshness_check_skips_l2_and_l3() -> None:
     (level match) are both skipped.
     """
     t0 = time.perf_counter()
-    baseline = await run_lumi_query(HAPPY_PATH_QUERY)
+    baseline = await _run_with_retry(lambda: run_lumi_query(HAPPY_PATH_QUERY))
     baseline_latency = time.perf_counter() - t0
 
     _assert_valid_timeline(baseline)  # type: ignore[arg-type]
 
     t0 = time.perf_counter()
-    fresh = await run_lumi_query("is the Kaggle one still free today?")
+    fresh = await _run_with_retry(
+        lambda: run_lumi_query("is the Kaggle one still free today?")
+    )
     fresh_latency = time.perf_counter() - t0
 
     _assert_valid_timeline(fresh)  # type: ignore[arg-type]
@@ -399,13 +474,13 @@ async def test_e2e_drill_down_only_runs_ranker() -> None:
     of the three non-OOS intents because most layers are skipped.
     """
     t0 = time.perf_counter()
-    baseline = await run_lumi_query(HAPPY_PATH_QUERY)
+    baseline = await _run_with_retry(lambda: run_lumi_query(HAPPY_PATH_QUERY))
     baseline_latency = time.perf_counter() - t0
 
     _assert_valid_timeline(baseline)  # type: ignore[arg-type]
 
     t0 = time.perf_counter()
-    detail = await run_lumi_query("tell me more about fast.ai")
+    detail = await _run_with_retry(lambda: run_lumi_query("tell me more about fast.ai"))
     detail_latency = time.perf_counter() - t0
 
     # drill_down may return a RecommendationResponse (L5 detail) or

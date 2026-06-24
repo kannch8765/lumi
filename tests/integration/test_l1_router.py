@@ -46,6 +46,7 @@ from app.orchestrator import (
     STATE_KEY_IDENTITY,
     STATE_KEY_RANKED_TIMELINE,
     _coerce_identity,
+    _make_l1_after_agent_callback,
     _make_should_i_run_callback,
     _rank_after_agent,
     create_lumi_pipeline,
@@ -69,13 +70,12 @@ def test_identity_profile_default_intent_is_full_pipeline() -> None:
 
 def test_identity_profile_default_target_agents_runs_everything() -> None:
     """Default ``target_agents`` for a fresh ``IdentityProfile`` lists
-    every L-layer agent (the L1 → L2 → L3 → L4 → ranker chain).
+    every L-layer agent (the L1 → L2 → L3 → L4 → ranker → L5 chain).
 
     Note: ``target_agents`` is now derived from ``intent`` by the
     ``_derive_target_agents_from_intent`` validator. The default
-    ``intent`` is ``"full_pipeline"`` whose mapping is the 4-agent
-    chain (l5_synthesizer is intentionally excluded — it's wired
-    separately in the orchestrator, not via the skip mechanism).
+    ``intent`` is ``"full_pipeline"`` whose mapping is the 5-agent
+    chain (L1 + L2 + L3 + L4 + ranker + L5).
     """
     profile = IdentityProfile(raw_query="hello")
     assert set(profile.target_agents) == {
@@ -83,6 +83,7 @@ def test_identity_profile_default_target_agents_runs_everything() -> None:
         "l3_level",
         "l4_timeline",
         "timeline_ranker",
+        "l5_synthesizer",
     }
 
 
@@ -197,7 +198,7 @@ def test_should_i_run_callback_returns_empty_content_when_not_targeted() -> None
         intent="freshness_check",  # type: ignore[arg-type]
     )
     # Validator derives target_agents from intent (freshness_check).
-    assert profile.target_agents == ["l4_timeline", "timeline_ranker"]
+    assert profile.target_agents == ["l4_timeline", "timeline_ranker", "l5_synthesizer"]
 
     ctx = _FakeCallbackContext(state={STATE_KEY_IDENTITY: profile})
     callback = _make_should_i_run_callback("l2_eligibility")
@@ -293,10 +294,20 @@ def test_pipeline_wired_callbacks_reference_correct_agent_names() -> None:
 # ── out_of_scope short-circuit (Task #63) ──────────────────────────────
 
 
-def test_rank_after_agent_writes_apology_when_out_of_scope() -> None:
-    """When ``identity.out_of_scope=True``, the ranker callback
-    writes the apology to ``state['final_user_response']`` and
-    skips the ranking step entirely."""
+def test_l1_after_agent_callback_writes_apology_when_out_of_scope() -> None:
+    """When ``identity.out_of_scope=True``, L1's ``after_agent_callback``
+    writes the apology to ``state['final_user_response']`` BEFORE any
+    downstream skip decision.
+
+    L1's callback runs unconditionally (L1 always runs as the router).
+    On the OOS path every downstream agent's ``before_agent_callback``
+    skips itself because ``target_agents=[]``, so the ranker's
+    callback (where the OOS logic used to live) is never invoked.
+    Moving the short-circuit to L1 guarantees
+    ``state['final_user_response']`` is set even when all downstream
+    agents are skipped.
+    """
+    callback = _make_l1_after_agent_callback()
     ctx = _FakeCallbackContext(
         state={
             STATE_KEY_IDENTITY: IdentityProfile(
@@ -307,24 +318,22 @@ def test_rank_after_agent_writes_apology_when_out_of_scope() -> None:
             )
         }
     )
-    # ``_rank_after_agent`` is a sync callback (ADK calls it directly,
-    # not via ``await``). Calling it with ``asyncio.run`` would fail
-    # with "a coroutine was expected, got Content".
-    result = _rank_after_agent(ctx)
-    assert isinstance(result, genai_types.Content)
-    assert result.parts == []
+    result = callback(ctx)
+    # Callback returns None (does not override L1's own output) so the
+    # apology surfaces via L1's user-visible turn.
+    assert result is None
     assert ctx.state[STATE_KEY_FINAL_USER_RESPONSE] == (
         "Lumi only handles AI/ML learning — please rephrase."
     )
-    # Ranker must NOT have written the timeline path when OOS.
-    assert STATE_KEY_RANKED_TIMELINE not in ctx.state
 
 
-def test_rank_after_agent_falls_back_to_default_apology_when_missing() -> None:
+def test_l1_after_agent_callback_falls_back_to_default_apology_when_missing() -> None:
     """If L1 sets ``out_of_scope=True`` but forgets the apology
-    text, the callback falls back to
+    text, L1's callback falls back to
     :data:`DEFAULT_OUT_OF_SCOPE_APOLOGY` so the user always gets
-    a reply."""
+    a reply.
+    """
+    callback = _make_l1_after_agent_callback()
     ctx = _FakeCallbackContext(
         state={
             STATE_KEY_IDENTITY: IdentityProfile(
@@ -335,13 +344,35 @@ def test_rank_after_agent_falls_back_to_default_apology_when_missing() -> None:
             )
         }
     )
-    _rank_after_agent(ctx)
+    callback(ctx)
     assert ctx.state[STATE_KEY_FINAL_USER_RESPONSE] == DEFAULT_OUT_OF_SCOPE_APOLOGY
 
 
-def test_rank_after_agent_runs_normally_when_in_scope() -> None:
+def test_l1_after_agent_callback_noop_when_in_scope() -> None:
     """The OOS check must NOT fire when ``out_of_scope=False`` —
-    the ranker should fall through to the timeline path.
+    L1's callback returns None and does not write
+    ``state['final_user_response']``, so the downstream timeline path
+    runs normally.
+    """
+    callback = _make_l1_after_agent_callback()
+    ctx = _FakeCallbackContext(
+        state={
+            STATE_KEY_IDENTITY: IdentityProfile(
+                raw_query="I am a CS undergrad",
+                intent="full_pipeline",  # type: ignore[arg-type]
+                out_of_scope=False,
+            )
+        }
+    )
+    result = callback(ctx)
+    assert result is None
+    assert STATE_KEY_FINAL_USER_RESPONSE not in ctx.state
+
+
+def test_rank_after_agent_runs_normally_when_in_scope() -> None:
+    """The ranker callback no longer handles OOS (moved to L1's
+    ``after_agent_callback``). On the in-scope path the ranker falls
+    through to the timeline path and writes ``state['ranked_timeline']``.
     """
     from app.agents.schemas import TimelineResult
 
@@ -365,11 +396,23 @@ def test_rank_after_agent_runs_normally_when_in_scope() -> None:
     [
         (
             "full_pipeline",
-            {"l2_eligibility", "l3_level", "l4_timeline", "timeline_ranker"},
+            {
+                "l2_eligibility",
+                "l3_level",
+                "l4_timeline",
+                "timeline_ranker",
+                "l5_synthesizer",
+            },
         ),
-        ("filter_only", {"l3_level", "l4_timeline", "timeline_ranker"}),
-        ("freshness_check", {"l4_timeline", "timeline_ranker"}),
-        ("drill_down", {"timeline_ranker"}),
+        (
+            "filter_only",
+            {"l3_level", "l4_timeline", "timeline_ranker", "l5_synthesizer"},
+        ),
+        (
+            "freshness_check",
+            {"l4_timeline", "timeline_ranker", "l5_synthesizer"},
+        ),
+        ("drill_down", {"timeline_ranker", "l5_synthesizer"}),
         ("out_of_scope", set()),
     ],
 )
@@ -441,7 +484,7 @@ def test_validator_overrides_incorrect_target_agents() -> None:
         intent="drill_down",  # type: ignore[arg-type]
         target_agents=list(LUMI_AGENT_NAMES),  # WRONG input — validator must override
     )
-    assert profile.target_agents == ["timeline_ranker"]
+    assert profile.target_agents == ["timeline_ranker", "l5_synthesizer"]
 
 
 # ── _coerce_identity helper ─────────────────────────────────────────────

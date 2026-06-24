@@ -186,9 +186,10 @@ def test_should_i_run_callback_skips_when_agent_not_targeted() -> None:
     """If identity lists a different target set, the agent is skipped.
 
     Uses a typed IdentityProfile with intent="freshness_check" so the
-    validator derives ``target_agents=["l4_timeline", "timeline_ranker"]``
-    (which excludes l5_synthesizer). This mirrors the path live probes
-    A2/A3/A4 took and proves the skip fires on typed state.
+    validator derives ``target_agents=["l4_timeline", "timeline_ranker",
+    "l5_synthesizer"]`` (which excludes l2_eligibility + l3_level).
+    This mirrors the path live probes A2/A3/A4 took and proves the
+    skip fires on typed state.
     """
     from app.agents.schemas import IdentityProfile
 
@@ -196,9 +197,13 @@ def test_should_i_run_callback_skips_when_agent_not_targeted() -> None:
         raw_query="is kaggle still free?",
         intent="freshness_check",
     )
-    assert profile.target_agents == ["l4_timeline", "timeline_ranker"]
+    assert profile.target_agents == [
+        "l4_timeline",
+        "timeline_ranker",
+        "l5_synthesizer",
+    ]
 
-    cb = _make_should_i_run_callback("l5_synthesizer")
+    cb = _make_should_i_run_callback("l2_eligibility")
     ctx = _FakeCtx({STATE_KEY_IDENTITY: profile})
 
     out = _run(cb(ctx))
@@ -248,13 +253,18 @@ def test_should_i_run_callback_skips_with_typed_identity_state() -> None:
         intent="freshness_check",
     )
     # Validator (IdentityProfile.model_validator) ensures target_agents
-    # is ["l4_timeline", "timeline_ranker"] for freshness_check.
-    assert profile.target_agents == ["l4_timeline", "timeline_ranker"]
+    # is ["l4_timeline", "timeline_ranker", "l5_synthesizer"] for
+    # freshness_check (l5 added so L5 actually runs for in-scope queries).
+    assert profile.target_agents == [
+        "l4_timeline",
+        "timeline_ranker",
+        "l5_synthesizer",
+    ]
 
     ctx = _FakeCtx({STATE_KEY_IDENTITY: profile})
     cb = _make_should_i_run_callback(
-        "l5_synthesizer"
-    )  # l5 NOT in freshness_check target
+        "l2_eligibility"
+    )  # l2 NOT in freshness_check target
 
     out = _run(cb(ctx))
     assert isinstance(out, genai_types.Content)

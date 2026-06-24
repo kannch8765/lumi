@@ -60,6 +60,7 @@ from typing import Any
 from google.adk.agents import LlmAgent, SequentialAgent
 from google.adk.sessions import InMemorySessionService
 from google.genai import types as genai_types
+from pydantic import ValidationError as PydanticValidationError
 
 from app.agents.l1_identity import create_l1_identity_agent
 from app.agents.l2_eligibility import create_l2_eligibility_agent
@@ -383,6 +384,13 @@ def _rank_after_agent(
     :func:`app.ranking.rank_timeline_entries`, and write the sorted
     result back to ``state['ranked_timeline']``.
 
+    Note: out-of-scope handling moved to L1's ``after_agent_callback``
+    (see :func:`_make_l1_after_agent_callback`). L1's callback runs
+    BEFORE any downstream skip decision, so it sets
+    ``state['final_user_response']`` first, guaranteeing a reply on
+    the OOS path even when this callback is short-circuited by
+    ``target_agents=[]``.
+
     Args:
         callback_context: ADK-provided callback context. We use it to
             access the live session state. The exact type is opaque
@@ -396,28 +404,6 @@ def _rank_after_agent(
     state = getattr(callback_context, "state", None)
     if state is None:
         logger.warning("ranker callback: no state on callback_context")
-        return genai_types.Content(role="model", parts=[])
-
-    # Out-of-scope short-circuit: when L1 marked the query as not about
-    # AI/ML learning, all downstream agents (L2/L3/L4) have already
-    # been skipped by their before_agent_callbacks. We surface L1's
-    # apology as the final response and skip the ranking step entirely,
-    # so the entire pipeline costs exactly 1 LLM call (L1).
-    identity = _coerce_identity(state.get(STATE_KEY_IDENTITY))
-    if identity is not None and identity.out_of_scope:
-        apology = identity.apology
-        # Defensive fallback: never let a missing apology collapse the
-        # pipeline to an empty user reply. The L1 prompt requires the
-        # field, but we don't want a schema bug to surface as silence.
-        if not isinstance(apology, str) or not apology.strip():
-            apology = DEFAULT_OUT_OF_SCOPE_APOLOGY
-        state[STATE_KEY_FINAL_USER_RESPONSE] = apology
-        logger.debug(
-            "ranker callback: out_of_scope short-circuit, "
-            "wrote %d-char apology to state['%s']",
-            len(apology),
-            STATE_KEY_FINAL_USER_RESPONSE,
-        )
         return genai_types.Content(role="model", parts=[])
 
     raw_timeline = _coerce_timeline(state.get(STATE_KEY_TIMELINE))
@@ -455,6 +441,52 @@ def _rank_after_agent(
     return genai_types.Content(role="model", parts=[])
 
 
+def _make_l1_after_agent_callback():
+    """Build L1's ``after_agent_callback`` that surfaces the apology
+    on the OOS path BEFORE any downstream skip decision.
+
+    When L1 marks a query as ``out_of_scope``, the
+    ``IdentityProfile.target_agents`` list is ``[]`` — so every
+    downstream agent's ``before_agent_callback`` skips itself with
+    zero LLM calls. Previously the apology lived in the ranker's
+    ``after_agent_callback``, but the ranker is itself skipped on the
+    OOS path (``timeline_ranker`` is not in ``target_agents``), so the
+    final-user-response key was never written. L1's callback fires
+    unconditionally (L1 is the router — it always runs), making it
+    the right place to write the apology.
+
+    Returns ``None`` so L1's structured ``IdentityProfile`` output
+    surfaces as the user-visible turn (the markdown L1 emits is
+    the apology — no override).
+    """
+
+    def _after_agent(callback_context: Any) -> genai_types.Content | None:
+        state = getattr(callback_context, "state", None)
+        if state is None:
+            return None
+        identity = _coerce_identity(state.get(STATE_KEY_IDENTITY))
+        if identity is None or not identity.out_of_scope:
+            return None  # in-scope — let downstream agents run normally
+        apology = identity.apology
+        # Defensive fallback: never let a missing apology collapse the
+        # pipeline to an empty user reply. The L1 prompt requires the
+        # field, but we don't want a schema bug to surface as silence.
+        if not isinstance(apology, str) or not apology.strip():
+            apology = DEFAULT_OUT_OF_SCOPE_APOLOGY
+        state[STATE_KEY_FINAL_USER_RESPONSE] = apology
+        logger.debug(
+            "L1 after_agent_callback: out_of_scope short-circuit, "
+            "wrote %d-char apology to state['%s']",
+            len(apology),
+            STATE_KEY_FINAL_USER_RESPONSE,
+        )
+        # Return None so L1's own output is the user-visible turn
+        # (don't override with an empty Content).
+        return None
+
+    return _after_agent
+
+
 def create_lumi_pipeline(
     model: str = DEFAULT_PIPELINE_MODEL,
 ) -> SequentialAgent:
@@ -481,11 +513,20 @@ def create_lumi_pipeline(
         A :class:`SequentialAgent` named ``"lumi_pipeline"`` with five
         sub-agents in execution order: L1, L2, L3, L4, ranker.
     """
+    # L1 always runs — it is the router, never skipped. Its output
+    # drives the target_agents list that the callbacks below check.
+    # Its ``after_agent_callback`` handles the out-of-scope
+    # short-circuit (writes apology to ``state['final_user_response']``
+    # BEFORE downstream skip decisions — see
+    # :func:`_make_l1_after_agent_callback`). We attach the callback
+    # post-construction because ``create_l1_identity_agent`` does not
+    # currently expose an ``after_agent_callback`` parameter — keeps
+    # the factory backward-compatible with existing callers.
+    l1_agent = create_l1_identity_agent(model=model)
+    l1_agent.after_agent_callback = _make_l1_after_agent_callback()
+
     sub_agents: list[LlmAgent] = [
-        # L1 always runs — it is the router, never skipped. Its
-        # output drives the target_agents list that the callbacks
-        # below check.
-        create_l1_identity_agent(model=model),
+        l1_agent,
         create_l2_eligibility_agent(
             model=model,
             before_agent_callback=_make_should_i_run_callback("l2_eligibility"),
@@ -610,12 +651,32 @@ async def run_lumi_query(
     # + L5) actually fire. We do not consume individual events here —
     # callers that need per-layer traces should use ``Runner.run_async``
     # directly.
-    async for _event in runner.run_async(
-        user_id=DEFAULT_USER_ID,
-        session_id=session.id,
-        new_message=content,
-    ):
-        pass
+    #
+    # Schema-validation fallback (Bug #7): L4 (and occasionally L5)
+    # are non-deterministic structured-output emitters. When their
+    # output fails Pydantic validation, ADK raises a
+    # ``ValidationError`` from inside ``run_async``. We catch it here
+    # so the caller still gets a structured payload (empty
+    # ``TimelineResult`` if state has nothing useful, otherwise
+    # whatever survived). Non-validation exceptions are re-raised so
+    # genuine bugs surface normally.
+    try:
+        async for _event in runner.run_async(
+            user_id=DEFAULT_USER_ID,
+            session_id=session.id,
+            new_message=content,
+        ):
+            pass
+    except PydanticValidationError:
+        logger.warning(
+            "run_lumi_query: layer output schema validation failed, "
+            "falling back to TimelineResult",
+            exc_info=True,
+        )
+        # Fall through to the post-pipeline extraction below, which
+        # returns whatever ``state['timeline']`` survived (or empty).
+    # NOTE: non-ValidationError exceptions intentionally propagate so
+    # genuine bugs surface to the caller.
 
     final_session = await session_service.get_session(
         app_name=DEFAULT_APP_NAME,

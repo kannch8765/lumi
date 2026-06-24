@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import inspect
 
+import pytest
 from google.adk.agents import LlmAgent, SequentialAgent
 
 from app.orchestrator import (
@@ -183,3 +184,119 @@ def test_run_lumi_query_signature_accepts_single_query_string() -> None:
     # The return union is the API contract — callers ``isinstance``-
     # check to decide which path to render.
     assert sig.return_annotation == ("TimelineResult | RecommendationResponse | str")
+
+
+# ── ValidationError fallback (Bug #7) ──────────────────────────────────
+
+
+def test_run_lumi_query_handles_layer_validation_error() -> None:
+    """``run_lumi_query`` must NOT propagate a Pydantic ValidationError
+    raised by an L-layer's structured output. Instead it logs a
+    WARNING and returns a structured ``TimelineResult`` so the caller
+    always receives a typed payload (never a raw exception).
+
+    L4 (and occasionally L5) are non-deterministic structured-output
+    emitters — sometimes the LLM emits a payload that fails schema
+    validation. Without this fallback the entire pipeline crashes
+    and the caller sees a raw exception. The orchestrator catches
+    ``pydantic.ValidationError`` from inside ``runner.run_async``,
+    logs it, and falls through to the post-pipeline extraction,
+    which returns an empty ``TimelineResult`` if no state survived.
+    """
+    import asyncio
+    from unittest.mock import patch
+
+    from pydantic import ValidationError as PydanticValidationError
+
+    from app.agents.schemas import TimelineResult
+
+    # Build a fake ValidationError — ``model_validate`` on garbage
+    # gives us a real one cheaply.
+    try:
+        TimelineResult.model_validate({"ranked": "not_a_list"})
+    except PydanticValidationError as exc:
+        validation_error = exc
+    else:
+        raise AssertionError("expected ValidationError from model_validate")
+
+    # Patch ``Runner.run_async`` to raise the validation error.
+    class _FakeRunner:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def run_async(self, **_kwargs):  # type: ignore[no-untyped-def]
+            async def _gen():
+                if False:
+                    yield None  # pragma: no cover — make this an async generator
+                raise validation_error
+
+            return _gen()
+
+    # Patch the InMemorySessionService too — the runner is constructed
+    # inside ``run_lumi_query`` so we patch ``google.adk.runners.Runner``
+    # at the import site.
+    captured: dict[str, str] = {}
+
+    class _FakeSession:
+        id = "sess-test"
+
+    class _FakeSessionService:
+        async def create_session(self, **_kwargs):  # type: ignore[no-untyped-def]
+            return _FakeSession()
+
+        async def get_session(self, **_kwargs):  # type: ignore[no-untyped-def]
+            # No state survived the failed runner — return empty.
+            captured["called"] = "yes"
+            return type("_S", (), {"state": {}})()
+
+    with (
+        patch("google.adk.runners.Runner", _FakeRunner),
+        patch("app.orchestrator.InMemorySessionService", _FakeSessionService),
+    ):
+        result = asyncio.run(run_lumi_query("anything"))
+
+    # Must NOT have re-raised — should return an empty TimelineResult.
+    assert isinstance(result, TimelineResult)
+    assert result.ranked == []
+    # And the fallback path was exercised (the fake session service
+    # got called for the post-pipeline extraction).
+    assert captured.get("called") == "yes"
+
+
+def test_run_lumi_query_reraises_non_validation_exceptions() -> None:
+    """Non-ValidationError exceptions from ``runner.run_async`` MUST
+    still propagate so genuine bugs (network errors, runtime crashes,
+    etc.) surface normally to the caller. Only schema-validation
+    failures get the graceful fallback.
+    """
+    import asyncio
+    from unittest.mock import patch
+
+    class _FakeRunner:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def run_async(self, **_kwargs):  # type: ignore[no-untyped-def]
+            async def _gen():
+                if False:
+                    yield None  # pragma: no cover
+                raise RuntimeError("upstream pipeline boom")
+
+            return _gen()
+
+    class _FakeSession:
+        id = "sess-test"
+
+    class _FakeSessionService:
+        async def create_session(self, **_kwargs):  # type: ignore[no-untyped-def]
+            return _FakeSession()
+
+        async def get_session(self, **_kwargs):  # type: ignore[no-untyped-def]
+            return type("_S", (), {"state": {}})()
+
+    with (
+        patch("google.adk.runners.Runner", _FakeRunner),
+        patch("app.orchestrator.InMemorySessionService", _FakeSessionService),
+    ):
+        with pytest.raises(RuntimeError, match="upstream pipeline boom"):
+            asyncio.run(run_lumi_query("anything"))

@@ -48,10 +48,16 @@ LUMI_AGENT_NAMES: tuple[str, ...] = (
 #                     L2/L3/L4, just run the ranker (and L5)
 # - out_of_scope:     no sub-agents; L1's apology is the final reply
 INTENT_TO_TARGET_AGENTS: dict[str, list[str]] = {
-    "full_pipeline": ["l2_eligibility", "l3_level", "l4_timeline", "timeline_ranker"],
-    "filter_only": ["l3_level", "l4_timeline", "timeline_ranker"],
-    "freshness_check": ["l4_timeline", "timeline_ranker"],
-    "drill_down": ["timeline_ranker"],
+    "full_pipeline": [
+        "l2_eligibility",
+        "l3_level",
+        "l4_timeline",
+        "timeline_ranker",
+        "l5_synthesizer",
+    ],
+    "filter_only": ["l3_level", "l4_timeline", "timeline_ranker", "l5_synthesizer"],
+    "freshness_check": ["l4_timeline", "timeline_ranker", "l5_synthesizer"],
+    "drill_down": ["timeline_ranker", "l5_synthesizer"],
     "out_of_scope": [],
 }
 
