@@ -260,10 +260,19 @@ def test_fallback_groups_by_urgency() -> None:
 # ─── Smoke: l5_after_agent Content shape ────────────────────────────────
 
 
-def test_l5_after_agent_returns_none_on_valid_output() -> None:
+def test_l5_after_agent_returns_pydantic_markdown_on_valid_output() -> None:
     """When ``state['final_recommendation']`` is a valid model, the
-    callback returns ``None`` so ADK surfaces L5's natural model
-    response without duplication (Bug #13 fix)."""
+    callback returns the Pydantic ``markdown`` field as a Content
+    (NOT the LLM's natural JSON text). This overrides ADK's default
+    of surfacing the LLM's raw JSON dump so the user sees a clean
+    markdown recommendation.
+
+    Bug #13 fix (re-applied 2026-06-24 after regression): the
+    previous attempt returned ``None`` to avoid double-render, but
+    that surfaced the raw JSON to the user. The correct behavior
+    is to actively override the LLM's natural text with the
+    schema-validated markdown.
+    """
 
     from app.agents.l5_synthesizer import _l5_after_agent
 
@@ -275,8 +284,9 @@ def test_l5_after_agent_returns_none_on_valid_output() -> None:
         }
 
     out = _l5_after_agent(_Ctx())
-    # Return None — let ADK use the LLM's natural response.
-    assert out is None
+    assert isinstance(out, genai_types.Content)
+    assert len(out.parts) == 1
+    assert out.parts[0].text == "Here are your picks."
 
 
 def test_l5_after_agent_falls_back_on_invalid_output() -> None:
@@ -298,7 +308,7 @@ def test_l5_after_agent_falls_back_on_invalid_output() -> None:
     assert "couldn't find" in out.parts[0].text.lower()
 
 
-def test_l5_after_agent_returns_none_on_no_state() -> None:
+def test_l5_after_agent_returns_empty_content_on_no_state() -> None:
     """If the callback context has no ``state``, return empty Content
     (defensive path)."""
 
