@@ -195,7 +195,7 @@ def _coerce_recommendation(value: Any) -> RecommendationResponse | None:
     return None
 
 
-def _l5_after_agent(callback_context: Any) -> genai_types.Content:
+def _l5_after_agent(callback_context: Any) -> genai_types.Content | None:
     """Surface L5's markdown as user-visible text, fall back if invalid.
 
     Wired into L5 as its ``after_agent_callback``. ADK invokes this
@@ -207,9 +207,17 @@ def _l5_after_agent(callback_context: Any) -> genai_types.Content:
        validation fails (refusal-pattern scrub, length cap, schema
        violation), fall back to a deterministic markdown summary
        rendered from ``state['ranked_timeline']``.
-    3. Return ``Content(role="model", parts=[Part(text=markdown)])``
-       so the CLI prints the user-facing recommendation directly —
-       NOT the raw JSON dump of the structured output.
+    3. **Return ``None`` when the structured output is valid** — ADK
+       will surface L5's natural model response (which is the same
+       markdown, just without the JSON wrapping) as the user-visible
+       text. Emitting a duplicate ``Content`` from the callback
+       caused the user to see the recommendation twice in the web UI
+       (Bug #13, observed 2026-06-24).
+    4. **Return ``Content`` only on the fallback path** — this is the
+       defense-in-depth for when the LLM's structured output fails
+       validation. The LLM may still emit natural text in that case,
+       but we override it with a deterministic, schema-safe summary
+       (no risk of refusal-pattern leakage or invented URLs).
 
     The fallback path is the defense-in-depth for the
     CONTEXT.md #19 ("no echo of system prompts") and
@@ -223,12 +231,14 @@ def _l5_after_agent(callback_context: Any) -> genai_types.Content:
     raw_rec = state.get(STATE_KEY_FINAL_RECOMMENDATION)
     coerced = _coerce_recommendation(raw_rec)
     if coerced is not None:
-        return genai_types.Content(
-            role="model",
-            parts=[genai_types.Part(text=coerced.markdown)],
-        )
+        # Valid structured output — let ADK surface L5's natural
+        # response. Returning None here prevents the double-render
+        # bug where the user saw both the LLM's text and our
+        # reconstructed Content.
+        return None
 
     # Validation failed — fall back to a code-rendered summary.
+    # This is the only path that emits Content from this callback.
     logger.warning(
         "L5 callback: structured output failed validation, rendering "
         "fallback from state['ranked_timeline']"
