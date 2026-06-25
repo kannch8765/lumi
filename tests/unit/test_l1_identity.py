@@ -101,6 +101,32 @@ def test_agent_instruction_is_non_empty_string() -> None:
     assert "TOOL ZONE" in instruction
 
 
+def test_l1_instruction_includes_age_inference_rule() -> None:
+    """L1's instruction tells it to infer age from education_level.
+
+    Refactor 2026-06-25: a "cs undergrad" query without an explicit
+    age was leaving ``age=null`` in the IdentityProfile, which made
+    L2 falsely reject every age-gated resource (the catalog has 26
+    LLM-related resources with age_requirement=18; the LLM judged
+    inconsistently when age was null and returned only 1). The
+    rule: undergraduate/graduate/professional → infer age >= 18;
+    high_school/self_taught → leave null. This makes L2's filter
+    deterministic.
+    """
+    from app.agents.l1_identity import _L1_INSTRUCTION
+
+    lowered = _L1_INSTRUCTION.lower()
+    # The four case-by-case education_level rules must be present.
+    assert "undergraduate" in lowered
+    assert "graduate" in lowered
+    assert "professional" in lowered
+    assert "high_school" in lowered
+    # The 18-year default for the inferable cases.
+    assert "age = 18" in _L1_INSTRUCTION
+    # The conservative carve-out for high_school / self_taught.
+    assert "do not infer" in lowered or "leave" in lowered
+
+
 # ── IdentityProfile schema ─────────────────────────────────────────────
 
 

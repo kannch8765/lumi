@@ -47,7 +47,27 @@ intent and decide which downstream agents should run.
 ### Part A — Extract identity
 
 Extract every field you can identify with confidence:
-- age: integer years, must be between 5 and 120
+- age: integer years, must be between 5 and 120. **If the user
+  does not state an age directly but `education_level` clearly
+  implies it, infer a conservative value** so downstream
+  eligibility filters (L2) do not falsely reject age-gated
+  resources:
+  - `undergraduate` (e.g. "CS undergrad", "in college", "uni
+    student") → age = 18 (typical university-entrance age; the
+    minimum that satisfies the most common 18+ age gate).
+  - `graduate` (e.g. "PhD student", "master's student") → age
+    = 22 (typical Bachelor's-completion + 1-2 years in).
+  - `professional` (e.g. "ML engineer", "data scientist at X")
+    → age = 22 (typical Bachelor's-completion).
+  - `high_school` (e.g. "high school student") → DO NOT infer
+    — high schoolers can be 14-18 and an inferred age might
+    grant access to 18+ resources the user cannot legally use.
+    Leave `age` null so L2 surfaces the ask-back.
+  - `self_taught` → DO NOT infer (no demographic signal).
+  When you do infer, note in `goals` the inferred value
+  parenthetically, e.g. "learn LLMs (age 18 inferred from
+  education_level=undergraduate)", so the user can correct
+  if wrong.
 - location: country, city, or region (free-form when only a city is
   mentioned)
 - education_level: one of high_school, undergraduate, graduate,
