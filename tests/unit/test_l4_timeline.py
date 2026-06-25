@@ -136,17 +136,53 @@ def test_l4_instruction_includes_explainer_first_rule() -> None:
     assert "Pre-coding explainer" in _L4_INSTRUCTION
     assert "explainer" in _L4_INSTRUCTION
     # The detection rule: pre-coding user + explainer resources =>
-    # explainers first.
+    # surface them as a "Start here" callout (NOT as a separate
+    # urgency bucket — sou 2026-06-25 feedback).
     assert "Start here" in _L4_INSTRUCTION
 
 
-def test_l4_instruction_includes_urgency_grouping() -> None:
-    """L4's instruction mentions URGENCY grouping (absorbed from L5)."""
-    assert "URGENCY" in _L4_INSTRUCTION
-    # The canonical urgency order CRITICAL -> HIGH -> MEDIUM -> LOW -> STALE
-    # is preserved.
+def test_l4_instruction_drops_urgency_headers_in_markdown() -> None:
+    """L4's markdown format section must NOT show URGENCY bucket
+    headers to users (sou 2026-06-25 feedback). Urgency is internal
+    classification only — the user-facing reply uses natural
+    language (skill-level grouping + a "Start here" callout).
+    """
+    # The format section must not include the canonical urgency
+    # *grouping* instruction (the source of user confusion). We
+    # check for the *instruction phrase* "### URGENCY" as a grouping
+    # command (with a backtick code-fence or surrounding context),
+    # not for the literal "URGENCY" word — the new instruction
+    # intentionally mentions "### URGENCY" as an example of what
+    # NOT to show, so a naive substring check would trip.
+    format_section_marker = "User-facing markdown format"
+    # Pull the markdown format section (and the explainer section
+    # that follows it; both are user-facing).
+    start = _L4_INSTRUCTION.find(format_section_marker)
+    assert start != -1, "Format section not found in L4 instruction"
+    # Take everything from the format section to end of instruction.
+    format_section = _L4_INSTRUCTION[start:]
+    # The format section must not *instruct* the LLM to use the
+    # canonical URGENCY bucket headers. Phrases like
+    # "### URGENCY headers" or "group by urgency" are the problem.
+    assert "Group resources by urgency" not in format_section
+    assert "URGENCY headers" not in format_section
+    assert "group by urgency" not in format_section.lower()
+    # The natural-language alternative must be present instead.
+    assert "natural language" in format_section.lower()
+    assert "skill level" in format_section.lower()
+
+
+def test_l4_instruction_keeps_urgency_classification_for_orchestrator() -> None:
+    """L4's INSTRUCTION ZONE still classifies urgency for the
+    orchestrator (sort order CRITICAL → HIGH → MEDIUM → LOW → STALE
+    feeds the internal TimelineResult). The DROP only applies to
+    the user-facing markdown — the classification itself stays.
+    """
+    # The INSTRUCTION ZONE classification block is preserved.
     assert "CRITICAL" in _L4_INSTRUCTION
     assert "STALE" in _L4_INSTRUCTION
+    # And the order is explicit.
+    assert "CRITICAL, HIGH, MEDIUM, LOW, STALE" in _L4_INSTRUCTION
 
 
 def test_l4_instruction_includes_refusal_pattern_scrub() -> None:

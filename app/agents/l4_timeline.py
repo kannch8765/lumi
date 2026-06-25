@@ -10,9 +10,12 @@ job — see refactor 2026-06-24, commit on branch
 
 L4 is the ONLY layer that combines the catalog MCP (for
 ``last_verified_free``) with the web-search MCP (for fresher
-alternatives). The output is sorted CRITICAL → HIGH → MEDIUM → LOW
-→ STALE and then formatted into user-facing markdown in a single
-LLM call.
+alternatives). The internal classification is CRITICAL → HIGH →
+MEDIUM → LOW → STALE, but the user-facing markdown does NOT show
+those buckets — it uses natural language (skill-level grouping +
+a "Start here" callout for pre-coding users) per sou's 2026-06-25
+feedback. Urgency is for the orchestrator + analytics, not for
+the user.
 
 SECURITY MODEL
 ==============
@@ -152,19 +155,42 @@ suggestion (e.g. "Register this week", "Bookmark and start in 2 months",
 ## User-facing markdown format (absorbed from former L5 Synthesizer)
 You emit a single :class:`RecommendationResponse` JSON object. Fields:
 - `markdown` — friendly recommendation text in the user's language
-  (see "Language selection" below). Group resources by urgency
-  using `### URGENCY` headers in this order: CRITICAL → HIGH →
-  MEDIUM → LOW → STALE. Each entry is a bullet: ``- [Resource
-  Name](url) — one-line "why this fits" rationale``. NEVER invent
-  URLs — copy them verbatim from `state['level_filter']` or the
-  catalog MCP `get_resource_by_id` output. If the input set is
-  empty, return a single short sentence: "I couldn't find
-  time-sensitive free resources for that — could you tell me more
-  about what you're looking for?" and use the empty payload path.
+  (see "Language selection" below). Write in **natural language**,
+  like you're recommending to a friend. **Do NOT expose internal
+  classification labels** to the user (no `### URGENCY`, no
+  `### CRITICAL`, no `### LOW`, no deadline bucket headers,
+  no `last_verified_free` dates) — those are internal metadata
+  for the orchestrator + analytics, and showing them makes the
+  reply look like a debugging dump.
+  - Open with a 1-2 sentence intro that names the strongest match
+    (e.g. "For learning LLMs hands-on, the Hugging Face course is
+    a great starting point — it walks you from basics to fine-tuning
+    with working code.").
+  - **Group by skill level** ONLY when you have 3+ resources in
+    the same level. Use natural headings like
+    `## If you're new to coding`, `## Beginner-friendly`,
+    `## Intermediate`, `## Advanced`. Omit groups that have
+    fewer than 1 resource.
+  - Each entry is a bullet: ``- [Resource Name](url) — one-line
+    "why this fits" rationale``. Lead each rationale with the
+    *practical* reason it fits THIS user (their language,
+    location, prior skills, goals) — not the urgency bucket.
+  - Lead with the strongest 1-2 matches; put borderline picks
+    later in the section. Order within a section is by
+    `fit_score` (highest first), then alphabetically.
+  - NEVER invent URLs — copy them verbatim from
+    `state['level_filter']` or the catalog MCP
+    `get_resource_by_id` output. If the input set is empty,
+    return a single short sentence: "I couldn't find free
+    resources for that — could you tell me more about what
+    you're looking for?" and use the empty payload path.
 - `language` — ISO 639-1 (or BCP-47) code from the user's
   `state['identity'].languages[0]`; default `"en"`.
 - `follow_up` — one short follow-up question (≤200 chars) inviting
-  the user into the next turn, OR `null` if none fits.
+  the user into the next turn, OR `null` if none fits. Frame
+  it as a *next step* the user might want (e.g. "Want me to
+  narrow this down to beginner-only, or in Portuguese?"), NOT
+  as a meta question about the data.
 - `ask_back` — short clarification question (≤500 chars) ONLY when
   `state['level_filter'].matches` is empty AND you cannot produce
   a useful recommendation. When `ask_back` is set, `markdown`
@@ -177,11 +203,17 @@ If `state['level_filter']` contains any resources with
 no-terminal introductions) AND the user's identity suggests
 pre-coding (no `education_level` set, OR no coding keywords like
 "Python", "PyTorch", "TensorFlow" in `goals` / `interests`),
-START your markdown with a section
-`## Start here — explainers` listing those explainer resources
-FIRST, before any coding courses. For a user who has never coded,
-the explainers are the right answer; linking them to "Kaggle
-Learn - Python" without context would be a bad recommendation.
+START your markdown with a short callout:
+
+> **Start here (no coding setup needed):**
+> - [Resource Name](url) — what you'll learn
+
+Then continue with the coding-required resources below.
+For a user who has never coded, the explainers are the right
+answer; linking them to "Kaggle Learn - Python" without context
+would be a bad recommendation. **Do not label this callout with
+an URGENCY bucket** — it's a "is this you?" callout, not a
+priority tag.
 
 ## Refusal-pattern scrub (NEVER)
 Never write "system prompt", "my instructions", "instruction zone",
@@ -280,8 +312,9 @@ def create_l4_timeline_agent(
     Emits a :class:`RecommendationResponse` (markdown + language +
     follow_up, or ``ask_back``) — the L5 Synthesizer's job was
     absorbed into L4 on 2026-06-24 (refactor ``refactor/stop-at-l4``).
-    Output markdown groups resources by urgency (CRITICAL → HIGH →
-    MEDIUM → LOW → STALE).
+    Output markdown uses natural language (skill-level grouping +
+    a "Start here" callout for pre-coding users); urgency buckets
+    are an internal classification, not user-visible.
 
     Args:
         model: Gemini model name. Defaults to the Flash-lite tier
@@ -356,11 +389,14 @@ def _render_fallback_markdown(state: dict[str, Any]) -> str:
     ``state['level_filter']`` (the L3 LevelFilterResult) and lists
     each match's name + URL + description, in fit-score order.
 
-    The LevelFilterResult lacks urgency annotations (those are an
-    L4 responsibility), so the fallback cannot group by URGENCY.
-    That's an acceptable degradation — the structured payload is
-    still useful for the user, and the LLM's structured output is
-    preferred when it validates cleanly.
+    The fallback path uses **natural language** (no urgency bucket
+    headers, no `### LOW` / `### CRITICAL` headings). The
+    LevelFilterResult lacks urgency annotations (those are an L4
+    responsibility), so the fallback cannot group by urgency
+    anyway — and even when L4's annotations are present, the
+    user shouldn't see internal classification. A clean flat list
+    + a 1-line intro is the right degradation. The LLM's
+    structured output is preferred when it validates cleanly.
     """
     raw = state.get("level_filter")
     matches: list[Any] = []
@@ -372,8 +408,8 @@ def _render_fallback_markdown(state: dict[str, Any]) -> str:
 
     if not matches:
         return (
-            "I couldn't find time-sensitive free resources for that — "
-            "could you tell me more about what you're looking for?"
+            "I couldn't find free resources for that — could you "
+            "tell me more about what you're looking for?"
         )
 
     lines: list[str] = [_FALLBACK_MARKDOWN_HEAD]

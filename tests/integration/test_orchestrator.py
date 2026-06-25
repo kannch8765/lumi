@@ -169,12 +169,14 @@ def test_run_lumi_query_is_callable() -> None:
 def test_run_lumi_query_signature_accepts_single_query_string() -> None:
     """``run_lumi_query`` takes a single ``query: str`` argument.
 
-    Returns one of three types, discriminated by content:
+    Returns one of four types, discriminated by ``isinstance``:
     - :class:`TimelineResult` — structured ranked list (fallback path).
     - :class:`RecommendationResponse` — final user-facing
-      recommendation (happy path through L5).
-    - ``str`` — apology (out_of_scope) or ask_back clarification
-      question (insufficient user info).
+      recommendation (happy path through L4).
+    - :class:`OutOfScopeResponse` — structured JSON OOS card
+      (refactor 2026-06-25, was a ``str`` apology before).
+    - ``str`` — ask_back clarification question (insufficient
+      user info).
     """
     sig = inspect.signature(run_lumi_query)
     params = list(sig.parameters.values())
@@ -185,7 +187,9 @@ def test_run_lumi_query_signature_accepts_single_query_string() -> None:
     assert params[0].annotation == "str"
     # The return union is the API contract — callers ``isinstance``-
     # check to decide which path to render.
-    assert sig.return_annotation == ("TimelineResult | RecommendationResponse | str")
+    assert sig.return_annotation == (
+        "TimelineResult | RecommendationResponse | OutOfScopeResponse | str"
+    )
 
 
 # ── ValidationError fallback (Bug #7) ──────────────────────────────────

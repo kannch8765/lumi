@@ -67,7 +67,7 @@ flowchart TD
     L2["L2 Eligibility<br/>catalog MCP, 3 tools<br/>→ CandidateSet"]
     L3["L3 Level Filter<br/>catalog MCP, 3 tools<br/>→ MatchedSet"]
     L4["L4 Timeline + Finalize<br/>catalog + web-search MCPs<br/>→ RecommendationResponse<br/>(markdown + language + follow_up)"]
-    Output(["Output<br/>urgency-grouped recommendation<br/>(CRITICAL → HIGH → MEDIUM → LOW → STALE)"])
+    Output(["Output<br/>natural-language recommendation<br/>(skill-level grouping + Start-here callout)"])
 
     User --> L1 --> L2 --> L3 --> L4 --> Output
 ```
@@ -181,6 +181,32 @@ L4 reads:
   question, mutually exclusive with ``markdown`` (the
   ``_validate_either_field`` model_validator enforces that at
   least one is set).
+
+#### Markdown format (user-facing)
+
+The `markdown` field is **natural language**, not a debug dump.
+Per sou's 2026-06-25 feedback, internal urgency classification
+(`CRITICAL` / `HIGH` / `MEDIUM` / `LOW` / `STALE`) is **never**
+exposed in the user-facing reply — the user doesn't care about
+internal buckets, and showing them looks like a broken classifier.
+
+Format rules (L4 instruction):
+- Open with a 1-2 sentence intro that names the strongest match
+  (e.g. "For learning LLMs hands-on, the Hugging Face course is
+  a great starting point...").
+- Group by **skill level** only when 3+ resources share a level
+  (`## Beginner-friendly`, `## Intermediate`, `## Advanced`).
+- If the user is pre-coding (no `education_level` set OR no coding
+  keywords in goals/interests) AND the candidate set contains
+  `type == "explainer"` resources, lead with a "Start here (no
+  coding setup needed):" callout listing the explainers first.
+- Each entry: ``- [Resource Name](url) — one-line rationale``.
+  Lead with the *practical* reason it fits THIS user (language,
+  location, prior skills), not the urgency bucket.
+- The `follow_up` is a *next step* the user might want, NOT a meta
+  question about the data.
+- URLs are copied verbatim from `state['level_filter']` or the
+  catalog MCP `get_resource_by_id` output. No invented URLs.
 
 #### Security model
 

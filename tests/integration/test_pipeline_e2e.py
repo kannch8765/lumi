@@ -261,19 +261,21 @@ async def test_e2e_edge_case_very_short_query() -> None:
 async def test_e2e_out_of_scope_returns_gracefully() -> None:
     """Out-of-scope: pizza recipe query.
 
-    Expect: pipeline does not crash. L1 should either:
-    - Refuse politely and produce an empty/minimal TimelineResult
-    - Or attempt to redirect to "AI for culinary applications" (creative)
-
-    Either way, output must be a valid TimelineResult, not an error.
+    Expect: pipeline does not crash. Refactor 2026-06-25: the OOS
+    path now returns an :class:`OutOfScopeResponse` (structured
+    JSON object), not a TimelineResult. The test just asserts the
+    pipeline didn't raise and that the response is a valid
+    OutOfScopeResponse with out_of_scope=True.
     """
+    from app.agents.schemas import OutOfScopeResponse
+
     result = await _run_with_retry(lambda: run_lumi_query(OUT_OF_SCOPE_QUERY))
 
-    _assert_valid_timeline(result)
-    # The output is allowed to be empty (refusal) or non-empty (redirect).
-    # We just want to ensure the pipeline didn't crash with an exception.
-    print(f"\n[OUT OF SCOPE] entries={len(result.ranked)}")
-    print(f"  Reasoning: {result.reasoning[:150]!r}")
+    assert isinstance(result, OutOfScopeResponse), (
+        f"expected OutOfScopeResponse, got {type(result).__name__}"
+    )
+    assert result.out_of_scope is True
+    print(f"\n[OUT OF SCOPE] reason={result.reason!r} topic={result.detected_topic!r}")
 
 
 # ─── Optional: latency baseline (skip by default, run with -v) ───────────

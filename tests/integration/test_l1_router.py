@@ -46,7 +46,6 @@ from pydantic import ValidationError
 
 from app.agents.schemas import IdentityProfile, LumiIntent
 from app.orchestrator import (
-    DEFAULT_OUT_OF_SCOPE_APOLOGY,
     STATE_KEY_FINAL_USER_RESPONSE,
     STATE_KEY_IDENTITY,
     _coerce_identity,
@@ -103,7 +102,8 @@ def test_identity_profile_default_apology_is_none() -> None:
     """Default ``apology=None`` so the field is optional.
 
     L1's ``after_agent_callback`` falls back to
-    :data:`DEFAULT_OUT_OF_SCOPE_APOLOGY` when L1 omits the apology,
+    :data:`DEFAULT_OUT_OF_SCOPE_APOLOGY` (now removed; OOS path
+    defaults to reason="other") when L1 omits the oos_reason,
     so a missing apology never collapses the pipeline to silence.
     """
     profile = IdentityProfile(raw_query="hello")
@@ -302,10 +302,16 @@ def test_pipeline_wired_callbacks_reference_correct_agent_names() -> None:
 # ── out_of_scope short-circuit (Task #63) ──────────────────────────────
 
 
-def test_l1_after_agent_callback_writes_apology_when_out_of_scope() -> None:
+def test_l1_after_agent_callback_writes_oos_response_when_out_of_scope() -> None:
     """When ``identity.out_of_scope=True``, L1's ``after_agent_callback``
-    writes the apology to ``state['final_user_response']`` BEFORE any
-    downstream skip decision.
+    writes a structured :class:`OutOfScopeResponse` to
+    ``state['final_user_response']`` BEFORE any downstream skip decision.
+
+    Refactor 2026-06-25: the response shape changed from a
+    natural-language apology string to a structured JSON object
+    (sou's request). The callback now builds an
+    OutOfScopeResponse(reason, detected_topic) from the identity
+    profile and writes it to state.
 
     L1's callback runs unconditionally (L1 always runs as the router).
     On the OOS path every downstream agent's ``before_agent_callback``
@@ -315,6 +321,8 @@ def test_l1_after_agent_callback_writes_apology_when_out_of_scope() -> None:
     ``state['final_user_response']`` is set even when all downstream
     agents are skipped.
     """
+    from app.agents.schemas import OutOfScopeResponse
+
     callback = _make_l1_after_agent_callback()
     ctx = _FakeCallbackContext(
         state={
@@ -322,6 +330,7 @@ def test_l1_after_agent_callback_writes_apology_when_out_of_scope() -> None:
                 raw_query="plan me a Tokyo trip",
                 intent="out_of_scope",  # type: ignore[arg-type]
                 out_of_scope=True,
+                oos_reason="travel_planning",
                 apology="Lumi only handles AI/ML learning — please rephrase.",
             )
         }
@@ -330,17 +339,27 @@ def test_l1_after_agent_callback_writes_apology_when_out_of_scope() -> None:
     # Callback returns None (does not override L1's own output) so the
     # apology surfaces via L1's user-visible turn.
     assert result is None
-    assert ctx.state[STATE_KEY_FINAL_USER_RESPONSE] == (
-        "Lumi only handles AI/ML learning — please rephrase."
-    )
+    written = ctx.state[STATE_KEY_FINAL_USER_RESPONSE]
+    assert isinstance(written, OutOfScopeResponse)
+    assert written.out_of_scope is True
+    assert written.reason == "travel_planning"
+    assert written.detected_topic == "plan me a Tokyo trip"
 
 
-def test_l1_after_agent_callback_falls_back_to_default_apology_when_missing() -> None:
-    """If L1 sets ``out_of_scope=True`` but forgets the apology
-    text, L1's callback falls back to
-    :data:`DEFAULT_OUT_OF_SCOPE_APOLOGY` so the user always gets
-    a reply.
+def test_l1_after_agent_callback_falls_back_to_other_reason_when_missing() -> None:
+    """If L1 sets ``out_of_scope=True`` but forgets the oos_reason,
+    the callback defaults to ``reason="other"`` so callers always
+    get a valid OutOfScopeResponse.
+
+    Refactor 2026-06-25: replaced the legacy
+    ``DEFAULT_OUT_OF_SCOPE_APOLOGY`` string fallback (now removed)
+    with a
+    reason-field fallback (``"other"``). The legacy apology
+    string is still kept on the IdentityProfile for callers that
+    need it, but the orchestrator returns OutOfScopeResponse.
     """
+    from app.agents.schemas import OutOfScopeResponse
+
     callback = _make_l1_after_agent_callback()
     ctx = _FakeCallbackContext(
         state={
@@ -348,12 +367,16 @@ def test_l1_after_agent_callback_falls_back_to_default_apology_when_missing() ->
                 raw_query="plan me a Tokyo trip",
                 intent="out_of_scope",  # type: ignore[arg-type]
                 out_of_scope=True,
+                oos_reason=None,
                 apology=None,
             )
         }
     )
     callback(ctx)
-    assert ctx.state[STATE_KEY_FINAL_USER_RESPONSE] == DEFAULT_OUT_OF_SCOPE_APOLOGY
+    written = ctx.state[STATE_KEY_FINAL_USER_RESPONSE]
+    assert isinstance(written, OutOfScopeResponse)
+    assert written.reason == "other"
+    assert written.detected_topic == "plan me a Tokyo trip"
 
 
 def test_l1_after_agent_callback_noop_when_in_scope() -> None:
@@ -443,16 +466,20 @@ def test_intent_to_target_agents_mapping(
 
 
 def test_run_lumi_query_returns_timeline_or_str() -> None:
-    """``run_lumi_query`` returns ``TimelineResult | RecommendationResponse | str``.
+    """``run_lumi_query`` returns the four-type union
+    ``TimelineResult | RecommendationResponse | OutOfScopeResponse | str``.
 
     The union is the API contract — callers ``isinstance``-check
     to decide which path to render. ``RecommendationResponse`` is
     emitted by L4 Timeline + Finalize (refactor 2026-06-24 absorbed
-    L5 into L4); ``str`` covers both the out-of-scope apology and
-    the ask-back clarification path.
+    L5 into L4); ``OutOfScopeResponse`` is the structured JSON OOS
+    card (refactor 2026-06-25, was a ``str`` apology before);
+    ``str`` covers the ask-back clarification path.
     """
     sig = inspect.signature(run_lumi_query)
-    assert sig.return_annotation == ("TimelineResult | RecommendationResponse | str")
+    assert sig.return_annotation == (
+        "TimelineResult | RecommendationResponse | OutOfScopeResponse | str"
+    )
 
 
 # ── Validator behavior (Task #9 — intent routing fix) ──────────────────

@@ -109,6 +109,15 @@ class IdentityProfile(BaseModel):
             and writes `final_user_response` = `apology`,
             short-circuiting the entire pipeline to 1 LLM call
             (L1 only).
+        oos_reason: Short machine-readable reason for the OOS
+            classification (e.g. "travel_planning", "cooking",
+            "shopping", "weather", "general_chitchat"). Populated
+            by L1 alongside `out_of_scope=True` so the
+            OutOfScopeResponse can carry a structured reason
+            field instead of a natural-language apology sentence.
+            Added 2026-06-25 at sou's request — the OOS
+            response shape was changed from a natural-language
+            string to a structured JSON object.
         apology: User-facing reply when `out_of_scope=True`.
             Should be 1-2 sentences, in the user's language,
             explaining Lumi's scope. L1's callback copies this
@@ -131,6 +140,16 @@ class IdentityProfile(BaseModel):
     target_agents: list[str] = Field(default_factory=lambda: list(LUMI_AGENT_NAMES))
     out_of_scope: bool = False
     apology: str | None = Field(default=None, max_length=500)
+    oos_reason: str | None = Field(
+        default=None,
+        max_length=50,
+        description=(
+            "Machine-readable reason for the OOS classification "
+            "(e.g. 'travel_planning', 'cooking', 'shopping'). "
+            "Added 2026-06-25 alongside the OutOfScopeResponse "
+            "schema refactor."
+        ),
+    )
 
     @model_validator(mode="after")
     def _derive_target_agents_from_intent(self) -> IdentityProfile:
@@ -485,3 +504,53 @@ def classify_days_until_deadline(days: int | None) -> Urgency:
     if days <= MEDIUM_THRESHOLD.days:
         return Urgency.MEDIUM
     return Urgency.LOW
+
+
+# ─── Out-of-scope response (added 2026-06-25, sou request) ───────────
+
+
+class OutOfScopeResponse(BaseModel):
+    """Structured response when L1 classifies a query as out-of-scope.
+
+    Replaces the previous natural-language apology string that
+    ``run_lumi_query`` returned for OOS queries. The user-facing
+    surface should be a clean JSON object (callers can
+    ``.model_dump_json()`` it), not a flowery apology sentence —
+    sou's 2026-06-25 feedback was that the apology reads as
+    condescending and the JSON form is cleaner for the web UI
+    to render.
+
+    Fields:
+        out_of_scope: Always True. Sentinel so callers can branch
+            on the type without ``isinstance`` introspection.
+        reason: Short machine-readable reason for the OOS
+            classification. One of a small enum-like set:
+            ``travel_planning``, ``cooking``, ``shopping``,
+            ``weather``, ``general_chitchat``, ``other``.
+            Populated from ``IdentityProfile.oos_reason`` (which
+            L1 writes). When L1 fails to populate the field,
+            the orchestrator falls back to ``other``.
+        detected_topic: The noun phrase L1 detected in the user's
+            query that triggered the OOS classification (e.g.
+            "one day trip in Tokyo", "pizza recipe", "GPU").
+            Useful for the UI to display *what* Lumi understood
+            the user to be asking about, so the OOS rejection
+            feels specific rather than generic. Optional —
+            may be None when L1 didn't extract a clean topic.
+
+    Example:
+        >>> OutOfScopeResponse(reason="travel_planning", detected_topic="one day trip in tokyo").model_dump_json()
+        '{"out_of_scope":true,"reason":"travel_planning","detected_topic":"one day trip in tokyo"}'
+    """
+
+    out_of_scope: Literal[True] = True
+    reason: str = Field(
+        default="other",
+        max_length=50,
+        description="Machine-readable reason (travel_planning, cooking, etc.)",
+    )
+    detected_topic: str | None = Field(
+        default=None,
+        max_length=200,
+        description="The topic noun phrase L1 detected in the user query",
+    )

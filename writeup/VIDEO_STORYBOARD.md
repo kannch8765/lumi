@@ -79,7 +79,8 @@ LAYER 2-4 — Resource pipeline
 ```
 LAYER 4 — Timeline + Finalize (catalog + web-search MCPs)
 "is this fresh? what's the user-facing answer?"
-markdown recommendation grouped by URGENCY (CRITICAL → STALE)
+natural-language markdown recommendation (URGENCY buckets
+are internal only, never shown to the user)
 ```
 
 > **Refactor 2026-06-24:** The pipeline is now 4 layers (L1 → L2 → L3 → L4).

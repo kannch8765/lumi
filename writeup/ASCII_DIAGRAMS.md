@@ -46,11 +46,13 @@
         v
   +-----------+
   |    L4     |   Timeline + Finalize Agent
-  | (catalog  |   adds urgency + deadlines + freshness, then emits
-  |   + web   |   the user-facing markdown recommendation directly
+  | (catalog  |   adds urgency + deadlines + freshness (internal),
+  |   + web   |   then emits natural-language markdown recommendation
   |  search)  |   2 MCP servers: catalog + web-search
   +-----+-----+   SERVER-AUTHORITATIVE date (no LLM hallucination)
-        |         groups by URGENCY (CRITICAL -> STALE)
+        |         natural-language grouping (skill level + "Start
+        |         here" callout for pre-coding); URGENCY buckets
+        |         are INTERNAL only, not shown to the user
         |         refuses to invent URLs
         v
   +-----------+
@@ -70,7 +72,8 @@
   L1          L2          L3          L4
 Identity  -> Eligibility -> Level   -> Timeline + Finalize
 no tools     3 MCP tools  3 MCP   2 MCP servers, emits markdown
-Pyd out      candidates   fit     urgency+date -> reply
+Pyd out      candidates   fit     natural-language reply (no
+                                       URGENCY buckets shown)
 ```
 
 ---

@@ -67,6 +67,7 @@ from app.agents.l4_timeline import (
 )
 from app.agents.schemas import (
     IdentityProfile,
+    OutOfScopeResponse,
     RecommendationResponse,
     TimelineResult,
 )
@@ -109,20 +110,9 @@ STATE_KEY_FINAL_USER_RESPONSE = "final_user_response"
 # returns the string verbatim.
 STATE_KEY_ASK_BACK = "ask_back"
 
-# Fallback apology used only when L1 marks the query out_of_scope but
-# fails to populate the ``apology`` field. Kept here (not in the L1
-# prompt) so a malformed L1 output never causes the pipeline to crash
-# or return an empty user response.
-DEFAULT_OUT_OF_SCOPE_APOLOGY = (
-    "I'm Lumi, a guide for free AI/ML learning resources. "
-    "Your question looks outside that scope — try asking about AI, "
-    "ML, or learning resources and I'll be glad to help."
-)
-
 # Fallback used when an L-layer fires ``ask_back`` but the field is
-# empty / whitespace-only. Mirrors ``DEFAULT_OUT_OF_SCOPE_APOLOGY`` —
-# defensive default so a malformed L-layer output never produces
-# silent failures.
+# empty / whitespace-only. Defensive default so a malformed L-layer
+# output never produces silent failures.
 DEFAULT_ASK_BACK_FALLBACK = (
     "Could you share a bit more about your background and what you'd "
     "like to learn? I can tailor recommendations better with more "
@@ -233,6 +223,31 @@ def _make_should_i_run_callback(agent_name: str):
     return _before_agent
 
 
+def _extract_oos_topic(raw_query: str | None) -> str | None:
+    """Extract a short noun phrase from an OOS query for the JSON response.
+
+    The OOS response is a JSON object with a ``detected_topic`` field
+    so the UI can show the user *what* Lumi understood them to be
+    asking about (e.g. "one day trip in tokyo", "pizza recipe",
+    "GPU"). Without this field, the OOS rejection feels generic.
+
+    Strategy: return the raw query, trimmed and clipped to 200 chars.
+    We don't try to extract a noun phrase heuristically — the raw
+    query is short for the OOS case (L1's prompt is the LLM-side
+    filter; this helper is just a presentation layer for the JSON
+    response shape). 200-char cap matches the
+    ``OutOfScopeResponse.detected_topic`` schema bound.
+    """
+    if not isinstance(raw_query, str):
+        return None
+    cleaned = raw_query.strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > 200:
+        return cleaned[:197] + "..."
+    return cleaned
+
+
 def _make_ask_back_after_agent_callback(layer_output_key: str):
     """Build an ``after_agent_callback`` that lifts ``ask_back`` from
     a layer's structured output into the flat ``state['ask_back']`` key.
@@ -312,8 +327,8 @@ def _make_ask_back_after_agent_callback(layer_output_key: str):
 
 
 def _make_l1_after_agent_callback():
-    """Build L1's ``after_agent_callback`` that surfaces the apology
-    on the OOS path BEFORE any downstream skip decision.
+    """Build L1's ``after_agent_callback`` that surfaces the OOS
+    response on the OOS path BEFORE any downstream skip decision.
 
     When L1 marks a query as ``out_of_scope``, the
     ``IdentityProfile.target_agents`` list is ``[]`` — so every
@@ -323,7 +338,16 @@ def _make_l1_after_agent_callback():
     OOS path (``timeline_ranker`` is not in ``target_agents``), so the
     final-user-response key was never written. L1's callback fires
     unconditionally (L1 is the router — it always runs), making it
-    the right place to write the apology.
+    the right place to write the OOS response.
+
+    Refactor 2026-06-25: the response shape changed from a
+    natural-language apology string to a structured
+    :class:`OutOfScopeResponse` JSON object (sou's request — the
+    apology read as condescending; the JSON form is cleaner for
+    the web UI to render). The callback now writes the
+    OutOfScopeResponse to ``state['final_user_response']`` and the
+    post-pipeline branch in :func:`run_lumi_query` returns it
+    as-is.
 
     Returns ``None`` so L1's structured ``IdentityProfile`` output
     surfaces as the user-visible turn (the markdown L1 emits is
@@ -337,17 +361,22 @@ def _make_l1_after_agent_callback():
         identity = _coerce_identity(state.get(STATE_KEY_IDENTITY))
         if identity is None or not identity.out_of_scope:
             return None  # in-scope — let downstream agents run normally
-        apology = identity.apology
-        # Defensive fallback: never let a missing apology collapse the
-        # pipeline to an empty user reply. The L1 prompt requires the
-        # field, but we don't want a schema bug to surface as silence.
-        if not isinstance(apology, str) or not apology.strip():
-            apology = DEFAULT_OUT_OF_SCOPE_APOLOGY
-        state[STATE_KEY_FINAL_USER_RESPONSE] = apology
+        # Build the structured OOS response. L1 populates
+        # oos_reason (machine-readable) and apology (legacy
+        # natural-language). We surface oos_reason + detected_topic
+        # (a short noun phrase) and keep apology as the UI fallback
+        # when the caller wants it.
+        detected_topic = _extract_oos_topic(identity.raw_query)
+        oos_resp = OutOfScopeResponse(
+            reason=identity.oos_reason or "other",
+            detected_topic=detected_topic,
+        )
+        state[STATE_KEY_FINAL_USER_RESPONSE] = oos_resp
         logger.debug(
             "L1 after_agent_callback: out_of_scope short-circuit, "
-            "wrote %d-char apology to state['%s']",
-            len(apology),
+            "wrote OutOfScopeResponse(reason=%r, topic=%r) to state['%s']",
+            oos_resp.reason,
+            oos_resp.detected_topic,
             STATE_KEY_FINAL_USER_RESPONSE,
         )
         # Return None so L1's own output is the user-visible turn
@@ -431,7 +460,7 @@ def create_lumi_pipeline(
 
 async def run_lumi_query(
     query: str,
-) -> TimelineResult | RecommendationResponse | str:
+) -> TimelineResult | RecommendationResponse | OutOfScopeResponse | str:
     """Run a single query through the full Lumi pipeline.
 
     Convenience wrapper for the most common caller pattern: build
@@ -451,7 +480,11 @@ async def run_lumi_query(
        field. Returns the clarification question as a ``str``.
     2. ``state['final_user_response']`` — set by L1's
        ``after_agent_callback`` when L1 marked the query as
-       ``out_of_scope``. Returns the apology as a ``str``.
+       ``out_of_scope``. Returns a :class:`OutOfScopeResponse`
+       (structured JSON object: reason + detected_topic). Refactor
+       2026-06-25 — previously returned a natural-language apology
+       string; sou requested the JSON form so the web UI can
+       render a clean card instead of a flowery sentence.
     3. ``state['final_recommendation']`` — set by L4's
        ``output_key`` (was L5's ``output_key`` pre-2026-06-24
        refactor). Returns a :class:`RecommendationResponse`.
@@ -472,16 +505,23 @@ async def run_lumi_query(
         One of:
         - A :class:`RecommendationResponse` (markdown + language +
           follow_up) on the happy in-scope path.
-        - A ``str`` apology when L1 classified the query as
-          ``out_of_scope``, OR a ``str`` clarification question when
-          an L-layer fired ``ask_back``.
+        - A :class:`OutOfScopeResponse` (JSON object with
+          ``out_of_scope=True``, ``reason``, ``detected_topic``)
+          when L1 classified the query as out of scope. Refactor
+          2026-06-25 — previously returned a natural-language
+          apology string; callers that need the string can
+          ``json.dumps(response.model_dump())``.
+        - A ``str`` clarification question when an L-layer fired
+          ``ask_back``.
         - An empty :class:`TimelineResult` as a last-resort
           fallback (defense-in-depth for schema-validation failures
           in :class:`L4 Timeline`).
 
-        The ``str`` variants are discriminated by content (apology
-        vs. question) — callers that need to distinguish should
-        check ``state`` directly via ``Runner.run_async``.
+        The four return types are discriminated via ``isinstance``
+        — callers can branch on :class:`OutOfScopeResponse` for
+        the OOS card render, ``str`` for the ask_back question,
+        :class:`RecommendationResponse` for the happy path, and
+        :class:`TimelineResult` for the empty fallback.
     """
     pipeline = create_lumi_pipeline()
     session_service = InMemorySessionService()
@@ -548,16 +588,30 @@ async def run_lumi_query(
 
     # 1. Ask-back short-circuit: an L-layer (L2/L3/L4) couldn't
     # proceed without more user input. Return the question as a
-    # plain ``str`` — same shape as the OOS apology for caller
+    # plain ``str`` — same shape as the OOS JSON for caller
     # convenience.
     ask_back = state.get(STATE_KEY_ASK_BACK)
     if isinstance(ask_back, str) and ask_back.strip():
         return ask_back
 
-    # 2. Out-of-scope apology short-circuit.
+    # 2. Out-of-scope short-circuit (refactor 2026-06-25).
+    # Previously the OOS path returned a natural-language apology
+    # string. sou's request was to return a structured JSON
+    # object instead — the response now carries a machine-readable
+    # reason + the detected topic noun phrase, so the web UI can
+    # render a clean card (not a flowery sentence). The legacy
+    # ``str`` branch is kept as a defensive fallback for any code
+    # path that still writes a plain string.
     final_response = state.get(STATE_KEY_FINAL_USER_RESPONSE)
-    if isinstance(final_response, str) and final_response.strip():
+    if isinstance(final_response, OutOfScopeResponse):
         return final_response
+    if isinstance(final_response, str) and final_response.strip():
+        # Legacy path — wrap the apology string in an
+        # OutOfScopeResponse so callers always get the new shape.
+        return OutOfScopeResponse(
+            reason="other",
+            detected_topic=None,
+        )
 
     # 3. L4 recommendation (preferred on the happy path).
     rec = state.get(STATE_KEY_FINAL_RECOMMENDATION)
