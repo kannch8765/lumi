@@ -17,11 +17,16 @@ real Gemini model (the live happy-path is covered by
   3. ``_make_should_i_run_callback`` factory returns callables
      that respect ``state['identity']['target_agents']``.
   4. The orchestrator wires the skip callback to every
-     downstream sub-agent (L2, L3, L4, ranker) but NOT to L1
+     downstream sub-agent (L2, L3, L4) but NOT to L1
      (the router itself, which must always run).
-  5. The ranker callback (``_rank_after_agent``) writes
+  5. The L1 callback (``_make_l1_after_agent_callback``) writes
      ``state['final_user_response']`` when ``out_of_scope=True``
-     and skips the ranking step.
+     so the OOS path short-circuits to a single LLM call.
+
+Refactor 2026-06-24: pipeline is now 4 layers (L1 → L2 → L3 → L4).
+The former ``timeline_ranker`` + ``l5_synthesizer`` were absorbed
+into L4 Timeline + Finalize. The intent → target_agents mapping
+was updated accordingly.
 
 Per CONTEXT.md #7 there are no mocks — these tests use a tiny
 fake ``callback_context`` that exposes ``.state`` as a plain
@@ -41,14 +46,11 @@ from pydantic import ValidationError
 
 from app.agents.schemas import IdentityProfile, LumiIntent
 from app.orchestrator import (
-    DEFAULT_OUT_OF_SCOPE_APOLOGY,
     STATE_KEY_FINAL_USER_RESPONSE,
     STATE_KEY_IDENTITY,
-    STATE_KEY_RANKED_TIMELINE,
     _coerce_identity,
     _make_l1_after_agent_callback,
     _make_should_i_run_callback,
-    _rank_after_agent,
     create_lumi_pipeline,
     run_lumi_query,
 )
@@ -70,20 +72,21 @@ def test_identity_profile_default_intent_is_full_pipeline() -> None:
 
 def test_identity_profile_default_target_agents_runs_everything() -> None:
     """Default ``target_agents`` for a fresh ``IdentityProfile`` lists
-    every L-layer agent (the L1 → L2 → L3 → L4 → ranker → L5 chain).
+    every L-layer agent (the L1 → L2 → L3 → L4 chain).
 
-    Note: ``target_agents`` is now derived from ``intent`` by the
+    Refactor 2026-06-24: the chain is now 4 layers (ranker + L5
+    absorbed into L4).
+
+    Note: ``target_agents`` is derived from ``intent`` by the
     ``_derive_target_agents_from_intent`` validator. The default
-    ``intent`` is ``"full_pipeline"`` whose mapping is the 5-agent
-    chain (L1 + L2 + L3 + L4 + ranker + L5).
+    ``intent`` is ``"full_pipeline"`` whose mapping is the 4-agent
+    chain (L2 + L3 + L4).
     """
     profile = IdentityProfile(raw_query="hello")
     assert set(profile.target_agents) == {
         "l2_eligibility",
         "l3_level",
         "l4_timeline",
-        "timeline_ranker",
-        "l5_synthesizer",
     }
 
 
@@ -98,9 +101,10 @@ def test_identity_profile_default_out_of_scope_false() -> None:
 def test_identity_profile_default_apology_is_none() -> None:
     """Default ``apology=None`` so the field is optional.
 
-    ``_rank_after_agent`` falls back to
-    :data:`DEFAULT_OUT_OF_SCOPE_APOLOGY` when L1 omits it, so a
-    missing apology never collapses the pipeline to silence.
+    L1's ``after_agent_callback`` falls back to
+    :data:`DEFAULT_OUT_OF_SCOPE_APOLOGY` (now removed; OOS path
+    defaults to reason="other") when L1 omits the oos_reason,
+    so a missing apology never collapses the pipeline to silence.
     """
     profile = IdentityProfile(raw_query="hello")
     assert profile.apology is None
@@ -173,7 +177,6 @@ def test_should_i_run_callback_returns_none_when_targeted() -> None:
                     "l2_eligibility",
                     "l3_level",
                     "l4_timeline",
-                    "timeline_ranker",
                 ],
             }
         }
@@ -197,8 +200,9 @@ def test_should_i_run_callback_returns_empty_content_when_not_targeted() -> None
         raw_query="is the Kaggle one still free?",
         intent="freshness_check",  # type: ignore[arg-type]
     )
-    # Validator derives target_agents from intent (freshness_check).
-    assert profile.target_agents == ["l4_timeline", "timeline_ranker", "l5_synthesizer"]
+    # Validator derives target_agents from intent (freshness_check,
+    # refactor 2026-06-24: now ["l4_timeline"] only).
+    assert profile.target_agents == ["l4_timeline"]
 
     ctx = _FakeCallbackContext(state={STATE_KEY_IDENTITY: profile})
     callback = _make_should_i_run_callback("l2_eligibility")
@@ -243,9 +247,13 @@ def test_should_i_run_callback_runs_when_target_agents_missing() -> None:
 
 
 def test_pipeline_wires_skip_callbacks_to_downstream_agents_only() -> None:
-    """L2/L3/L4/ranker each have a ``before_agent_callback`` so the
+    """L2/L3/L4 each have a ``before_agent_callback`` so the
     router can skip them; L1 itself has NO callback (the router
-    always runs, by design)."""
+    always runs, by design).
+
+    Refactor 2026-06-24: the pipeline is now 4 layers (L1 → L2 →
+    L3 → L4); the former ``timeline_ranker`` no longer exists.
+    """
     pipeline = create_lumi_pipeline()
     assert isinstance(pipeline, SequentialAgent)
     names_to_callbacks = {
@@ -255,7 +263,7 @@ def test_pipeline_wires_skip_callbacks_to_downstream_agents_only() -> None:
     # L1 must NOT have a skip callback — it's the router, always runs.
     assert names_to_callbacks["l1_identity"] is None
     # Every downstream agent MUST have a skip callback.
-    for name in ("l2_eligibility", "l3_level", "l4_timeline", "timeline_ranker"):
+    for name in ("l2_eligibility", "l3_level", "l4_timeline"):
         assert names_to_callbacks[name] is not None, (
             f"{name} should have a before_agent_callback wired by the orchestrator"
         )
@@ -294,19 +302,27 @@ def test_pipeline_wired_callbacks_reference_correct_agent_names() -> None:
 # ── out_of_scope short-circuit (Task #63) ──────────────────────────────
 
 
-def test_l1_after_agent_callback_writes_apology_when_out_of_scope() -> None:
+def test_l1_after_agent_callback_writes_oos_response_when_out_of_scope() -> None:
     """When ``identity.out_of_scope=True``, L1's ``after_agent_callback``
-    writes the apology to ``state['final_user_response']`` BEFORE any
-    downstream skip decision.
+    writes a structured :class:`OutOfScopeResponse` to
+    ``state['final_user_response']`` BEFORE any downstream skip decision.
+
+    Refactor 2026-06-25: the response shape changed from a
+    natural-language apology string to a structured JSON object
+    (sou's request). The callback now builds an
+    OutOfScopeResponse(reason, detected_topic) from the identity
+    profile and writes it to state.
 
     L1's callback runs unconditionally (L1 always runs as the router).
     On the OOS path every downstream agent's ``before_agent_callback``
-    skips itself because ``target_agents=[]``, so the ranker's
-    callback (where the OOS logic used to live) is never invoked.
+    skips itself because ``target_agents=[]``, so L4's callback
+    (where the OOS logic used to live via the ranker) is never invoked.
     Moving the short-circuit to L1 guarantees
     ``state['final_user_response']`` is set even when all downstream
     agents are skipped.
     """
+    from app.agents.schemas import OutOfScopeResponse
+
     callback = _make_l1_after_agent_callback()
     ctx = _FakeCallbackContext(
         state={
@@ -314,6 +330,7 @@ def test_l1_after_agent_callback_writes_apology_when_out_of_scope() -> None:
                 raw_query="plan me a Tokyo trip",
                 intent="out_of_scope",  # type: ignore[arg-type]
                 out_of_scope=True,
+                oos_reason="travel_planning",
                 apology="Lumi only handles AI/ML learning — please rephrase.",
             )
         }
@@ -322,17 +339,27 @@ def test_l1_after_agent_callback_writes_apology_when_out_of_scope() -> None:
     # Callback returns None (does not override L1's own output) so the
     # apology surfaces via L1's user-visible turn.
     assert result is None
-    assert ctx.state[STATE_KEY_FINAL_USER_RESPONSE] == (
-        "Lumi only handles AI/ML learning — please rephrase."
-    )
+    written = ctx.state[STATE_KEY_FINAL_USER_RESPONSE]
+    assert isinstance(written, OutOfScopeResponse)
+    assert written.out_of_scope is True
+    assert written.reason == "travel_planning"
+    assert written.detected_topic == "plan me a Tokyo trip"
 
 
-def test_l1_after_agent_callback_falls_back_to_default_apology_when_missing() -> None:
-    """If L1 sets ``out_of_scope=True`` but forgets the apology
-    text, L1's callback falls back to
-    :data:`DEFAULT_OUT_OF_SCOPE_APOLOGY` so the user always gets
-    a reply.
+def test_l1_after_agent_callback_falls_back_to_other_reason_when_missing() -> None:
+    """If L1 sets ``out_of_scope=True`` but forgets the oos_reason,
+    the callback defaults to ``reason="other"`` so callers always
+    get a valid OutOfScopeResponse.
+
+    Refactor 2026-06-25: replaced the legacy
+    ``DEFAULT_OUT_OF_SCOPE_APOLOGY`` string fallback (now removed)
+    with a
+    reason-field fallback (``"other"``). The legacy apology
+    string is still kept on the IdentityProfile for callers that
+    need it, but the orchestrator returns OutOfScopeResponse.
     """
+    from app.agents.schemas import OutOfScopeResponse
+
     callback = _make_l1_after_agent_callback()
     ctx = _FakeCallbackContext(
         state={
@@ -340,12 +367,16 @@ def test_l1_after_agent_callback_falls_back_to_default_apology_when_missing() ->
                 raw_query="plan me a Tokyo trip",
                 intent="out_of_scope",  # type: ignore[arg-type]
                 out_of_scope=True,
+                oos_reason=None,
                 apology=None,
             )
         }
     )
     callback(ctx)
-    assert ctx.state[STATE_KEY_FINAL_USER_RESPONSE] == DEFAULT_OUT_OF_SCOPE_APOLOGY
+    written = ctx.state[STATE_KEY_FINAL_USER_RESPONSE]
+    assert isinstance(written, OutOfScopeResponse)
+    assert written.reason == "other"
+    assert written.detected_topic == "plan me a Tokyo trip"
 
 
 def test_l1_after_agent_callback_noop_when_in_scope() -> None:
@@ -369,23 +400,25 @@ def test_l1_after_agent_callback_noop_when_in_scope() -> None:
     assert STATE_KEY_FINAL_USER_RESPONSE not in ctx.state
 
 
-def test_rank_after_agent_runs_normally_when_in_scope() -> None:
-    """The ranker callback no longer handles OOS (moved to L1's
-    ``after_agent_callback``). On the in-scope path the ranker falls
-    through to the timeline path and writes ``state['ranked_timeline']``.
-    """
-    from app.agents.schemas import TimelineResult
-
+def test_l1_after_agent_callback_does_not_affect_when_in_scope() -> None:
+    """Refactor 2026-06-24: the former ``test_rank_after_agent_runs_normally_when_in_scope``
+    is replaced by this — the ranker no longer exists, so there's no
+    ranker callback to test. L1's callback still doesn't touch
+    ``state['final_user_response']`` on the in-scope path."""
+    callback = _make_l1_after_agent_callback()
     ctx = _FakeCallbackContext(
         state={
-            STATE_KEY_IDENTITY: {"out_of_scope": False},
-            "timeline": TimelineResult().model_dump(mode="json"),
+            STATE_KEY_IDENTITY: IdentityProfile(
+                raw_query="I am a CS undergrad",
+                intent="full_pipeline",
+                out_of_scope=False,
+            )
         }
     )
-    _rank_after_agent(ctx)
-    # Normal path: final_user_response untouched, ranked_timeline written.
+    result = callback(ctx)
+    assert result is None
+    # No final_user_response written on the in-scope path.
     assert STATE_KEY_FINAL_USER_RESPONSE not in ctx.state
-    assert STATE_KEY_RANKED_TIMELINE in ctx.state
 
 
 # ── Intent → target_agents mapping (Task #61) ─────────────────────────
@@ -396,23 +429,17 @@ def test_rank_after_agent_runs_normally_when_in_scope() -> None:
     [
         (
             "full_pipeline",
-            {
-                "l2_eligibility",
-                "l3_level",
-                "l4_timeline",
-                "timeline_ranker",
-                "l5_synthesizer",
-            },
+            {"l2_eligibility", "l3_level", "l4_timeline"},
         ),
         (
             "filter_only",
-            {"l3_level", "l4_timeline", "timeline_ranker", "l5_synthesizer"},
+            {"l3_level", "l4_timeline"},
         ),
         (
             "freshness_check",
-            {"l4_timeline", "timeline_ranker", "l5_synthesizer"},
+            {"l4_timeline"},
         ),
-        ("drill_down", {"timeline_ranker", "l5_synthesizer"}),
+        ("drill_down", {"l4_timeline"}),
         ("out_of_scope", set()),
     ],
 )
@@ -426,6 +453,10 @@ def test_intent_to_target_agents_mapping(
     now asserts the validator's output for each intent rather than the
     static mapping literal. A regression in the validator or the
     routing constants is caught here.
+
+    Refactor 2026-06-24: the mapping was simplified — the former
+    ``timeline_ranker`` + ``l5_synthesizer`` are gone, so each intent
+    now targets fewer agents.
     """
     profile = IdentityProfile(raw_query="hello", intent=intent)  # type: ignore[arg-type]
     assert set(profile.target_agents) == expected_agents
@@ -435,15 +466,20 @@ def test_intent_to_target_agents_mapping(
 
 
 def test_run_lumi_query_returns_timeline_or_str() -> None:
-    """``run_lumi_query`` returns ``TimelineResult | RecommendationResponse | str``.
+    """``run_lumi_query`` returns the four-type union
+    ``TimelineResult | RecommendationResponse | OutOfScopeResponse | str``.
 
     The union is the API contract — callers ``isinstance``-check
-    to decide which path to render. ``RecommendationResponse`` was
-    added when L5 (Synthesizer) was wired in; ``str`` covers both
-    the out-of-scope apology and the ask-back clarification path.
+    to decide which path to render. ``RecommendationResponse`` is
+    emitted by L4 Timeline + Finalize (refactor 2026-06-24 absorbed
+    L5 into L4); ``OutOfScopeResponse`` is the structured JSON OOS
+    card (refactor 2026-06-25, was a ``str`` apology before);
+    ``str`` covers the ask-back clarification path.
     """
     sig = inspect.signature(run_lumi_query)
-    assert sig.return_annotation == ("TimelineResult | RecommendationResponse | str")
+    assert sig.return_annotation == (
+        "TimelineResult | RecommendationResponse | OutOfScopeResponse | str"
+    )
 
 
 # ── Validator behavior (Task #9 — intent routing fix) ──────────────────
@@ -469,13 +505,16 @@ def test_validator_derives_target_agents_for_all_five_intents(intent: str) -> No
 
 
 def test_validator_overrides_incorrect_target_agents() -> None:
-    """Even if L1 emits target_agents=all_5 with intent='drill_down',
-    the validator narrows it to ['timeline_ranker'].
+    """Even if L1 emits target_agents=all_3 with intent='drill_down',
+    the validator narrows it to ['l4_timeline'].
 
     This is the bug class: L1 prompt tells the model to set
     target_agents per intent, but Gemini 3.1 Flash Lite is
     inconsistent for non-OOS intents. The validator makes that
     inconsistency irrelevant.
+
+    Refactor 2026-06-24: drill_down now narrows to ``['l4_timeline']``
+    (the chain is 4 layers, no separate ranker / L5).
     """
     from app.routing import LUMI_AGENT_NAMES
 
@@ -484,7 +523,7 @@ def test_validator_overrides_incorrect_target_agents() -> None:
         intent="drill_down",  # type: ignore[arg-type]
         target_agents=list(LUMI_AGENT_NAMES),  # WRONG input — validator must override
     )
-    assert profile.target_agents == ["timeline_ranker", "l5_synthesizer"]
+    assert profile.target_agents == ["l4_timeline"]
 
 
 # ── _coerce_identity helper ─────────────────────────────────────────────
@@ -506,7 +545,6 @@ def test_coerce_identity_accepts_valid_dict() -> None:
             "l2_eligibility",
             "l3_level",
             "l4_timeline",
-            "timeline_ranker",
         ],
     }
     result = _coerce_identity(payload)
@@ -543,8 +581,11 @@ def test_should_i_run_callback_skips_with_typed_identity_state() -> None:
     """A typed IdentityProfile in state drives the skip decision
     correctly — this is the test that proves the Pydantic-model
     delivery path works (previously the failing path).
+
+    Refactor 2026-06-24: ``freshness_check`` now skips L2 + L3 and
+    runs L4 only (no separate ranker).
     """
-    # freshness_check: skip L2 + L3, run L4 + ranker
+    # freshness_check: skip L2 + L3, run L4
     profile = IdentityProfile(
         raw_query="is kaggle still free?", intent="freshness_check"
     )

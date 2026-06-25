@@ -35,7 +35,7 @@ _LUMI_AGENT_NAMES = LUMI_AGENT_NAMES
 # See app/agents/l1_identity.py:_L1_INSTRUCTION for the full classification
 # rules + examples for each intent.
 LumiIntent = Literal[
-    "full_pipeline",  # Initial query: L1 → L2 → L3 → L4 → ranker
+    "full_pipeline",  # Initial query: L1 → L2 → L3 → L4
     "filter_only",  # Follow-up: re-filter existing eligibility results
     "freshness_check",  # Follow-up: re-check last_verified_free on existing picks
     "drill_down",  # Follow-up: details on one specific resource
@@ -102,17 +102,26 @@ class IdentityProfile(BaseModel):
             run, derived from `intent`. Each sub-agent's
             `before_agent_callback` checks this list and skips
             itself (returns an empty Content, 0 LLM call) if
-            not present. Default = all 4 downstream agents.
+            not present. Default = all 3 downstream agents.
             L1 always runs (it is the router, never skipped).
         out_of_scope: True when the query is NOT about AI/ML
-            learning. The orchestrator's ranker callback reads
-            this and writes `final_user_response` = `apology`
-            instead of running the rank, short-circuiting the
-            entire pipeline to 1 LLM call (L1 only).
+            learning. L1's `after_agent_callback` reads this
+            and writes `final_user_response` = `apology`,
+            short-circuiting the entire pipeline to 1 LLM call
+            (L1 only).
+        oos_reason: Short machine-readable reason for the OOS
+            classification (e.g. "travel_planning", "cooking",
+            "shopping", "weather", "general_chitchat"). Populated
+            by L1 alongside `out_of_scope=True` so the
+            OutOfScopeResponse can carry a structured reason
+            field instead of a natural-language apology sentence.
+            Added 2026-06-25 at sou's request — the OOS
+            response shape was changed from a natural-language
+            string to a structured JSON object.
         apology: User-facing reply when `out_of_scope=True`.
             Should be 1-2 sentences, in the user's language,
-            explaining Lumi's scope. The ranker callback copies
-            this verbatim into `state['final_user_response']`.
+            explaining Lumi's scope. L1's callback copies this
+            verbatim into `state['final_user_response']`.
     """
 
     age: int | None = Field(default=None, ge=5, le=120)
@@ -131,6 +140,16 @@ class IdentityProfile(BaseModel):
     target_agents: list[str] = Field(default_factory=lambda: list(LUMI_AGENT_NAMES))
     out_of_scope: bool = False
     apology: str | None = Field(default=None, max_length=500)
+    oos_reason: str | None = Field(
+        default=None,
+        max_length=50,
+        description=(
+            "Machine-readable reason for the OOS classification "
+            "(e.g. 'travel_planning', 'cooking', 'shopping'). "
+            "Added 2026-06-25 alongside the OutOfScopeResponse "
+            "schema refactor."
+        ),
+    )
 
     @model_validator(mode="after")
     def _derive_target_agents_from_intent(self) -> IdentityProfile:
@@ -330,7 +349,15 @@ class TimelineResult(BaseModel):
     ask_back: str | None = Field(default=None, max_length=500)
 
 
-# ─── L5 Synthesizer output ─────────────────────────────────────────────
+# ─── L4 Final Recommendation output (was: L5 Synthesizer output) ─────
+#
+# Refactor 2026-06-24: the L5 Synthesizer layer was absorbed into L4
+# Timeline. The "final user-facing markdown recommendation" is now L4's
+# direct output, written to state['final_recommendation'] instead of
+# being emitted by a separate L5 agent. The schema is unchanged
+# structurally — L4 still emits markdown + language + follow_up — but
+# an additional ``ask_back`` field supports the ask_back short-circuit
+# flow that previously fired from L4's TimelineResult.
 
 
 # Refusal-pattern strings that must never appear in user-facing agent
@@ -345,55 +372,73 @@ _REFUSAL_PATTERNS = (
 
 
 class RecommendationResponse(BaseModel):
-    """L5's structured output — the final user-facing recommendation.
+    """L4's structured output — the final user-facing recommendation.
 
-    L5 reads the sorted timeline (``state['ranked_timeline']``) plus
-    the user's identity profile (``state['identity']``) and emits a
-    natural-language markdown reply, grouped by urgency, with one line
-    per resource. This schema is the L5 / ADK boundary contract — the
-    CLI and FastAPI surfaces render the ``markdown`` field directly.
+    Refactor 2026-06-24: L5 Synthesizer was absorbed into L4. L4 now
+    reads the level-filtered resources (``state['level_filter']``)
+    plus the user's identity profile (``state['identity']``) and
+    emits a natural-language markdown reply grouped by urgency, with
+    one line per resource. This schema is the L4 / ADK boundary
+    contract — the CLI and FastAPI surfaces render the ``markdown``
+    field directly.
 
     Security guards (CONTEXT.md #18-22, threat_model.md):
 
     * ``markdown`` is bounded to 3000 chars (DoS via context overflow).
+      Nullable so ``ask_back`` can carry a clarification question
+      without a placeholder markdown.
     * A refusal-pattern scrub (see ``_REFUSAL_PATTERNS``) rejects any
       string containing "system prompt", "my instructions", or
-      "instruction zone" — case-insensitive. Defense against the L5
+      "instruction zone" — case-insensitive. Defense against the L4
       LLM echoing its own INSTRUCTION zone into the user reply.
     * ``follow_up`` is optional (a single suggested next question) and
       capped at 200 chars.
     * ``language`` is an ISO 639-1 code, capped at 10 chars (allows
       BCP-47 subtags like ``pt-BR``).
+    * ``ask_back`` is a user-facing clarification question. Set when
+      L4 needs more info to proceed (e.g., the L3 result is empty).
+      Mutually exclusive with ``markdown`` in spirit but the model
+      allows either — at least one of ``markdown`` / ``ask_back``
+      must be non-empty (enforced by ``_validate_either_field``).
 
     Attributes:
         markdown: Natural-language user-facing recommendation. Plain
             text / markdown only — no HTML, no JS, no executable
-            content.
+            content. ``None`` is allowed when ``ask_back`` is set.
         language: ISO 639-1 (or BCP-47) language code for the reply.
             Drives client-side rendering (e.g., selecting a voice for
             TTS). Defaults to ``"en"``.
         follow_up: Optional single-sentence follow-up question to
             prompt the user into a follow-up turn (e.g., "Want me to
-            filter by deadline?"). ``None`` means L5 has no natural
+            filter by deadline?"). ``None`` means L4 has no natural
             follow-up.
+        ask_back: Optional clarification question L4 surfaces when it
+            cannot produce a useful recommendation. The orchestrator's
+            ``_make_ask_back_after_agent_callback`` lifts this into
+            ``state['ask_back']`` so downstream layers skip themselves
+            and ``run_lumi_query`` returns the string verbatim.
     """
 
-    markdown: str = Field(min_length=1, max_length=3000)
+    markdown: str | None = Field(default=None, max_length=3000)
     language: str = Field(default="en", min_length=2, max_length=10)
     follow_up: str | None = Field(default=None, max_length=200)
+    ask_back: str | None = Field(default=None, max_length=500)
 
     @field_validator("markdown")
     @classmethod
-    def _scrub_refusal_patterns(cls, v: str) -> str:
+    def _scrub_refusal_patterns(cls, v: str | None) -> str | None:
         """Reject strings that echo INSTRUCTION-zone content (CONTEXT.md #19).
 
         Case-insensitive substring match against ``_REFUSAL_PATTERNS``.
         Raises ``ValueError`` so Pydantic surfaces the violation as a
-        schema validation failure — the L5 ``after_agent_callback``
+        schema validation failure — the L4 ``after_agent_callback``
         catches the failure and falls back to a code-rendered
-        recommendation built directly from
-        ``state['ranked_timeline']``.
+        recommendation built directly from ``state['level_filter']``.
+        ``None`` is allowed (the ``ask_back`` path doesn't need
+        markdown).
         """
+        if v is None:
+            return v
         lowered = v.lower()
         for needle in _REFUSAL_PATTERNS:
             if needle in lowered:
@@ -402,6 +447,24 @@ class RecommendationResponse(BaseModel):
                     "(CONTEXT.md #19: do not echo instruction zone)"
                 )
         return v
+
+    @model_validator(mode="after")
+    def _validate_either_field(self) -> RecommendationResponse:
+        """At least one of ``markdown`` or ``ask_back`` must be set.
+
+        The LLM might forget to populate either field; this validator
+        surfaces that as a schema failure so the
+        ``after_agent_callback`` can fall back to a code-rendered
+        response instead of returning empty markdown.
+        """
+        has_md = bool(self.markdown and self.markdown.strip())
+        has_ab = bool(self.ask_back and self.ask_back.strip())
+        if not has_md and not has_ab:
+            raise ValueError(
+                "RecommendationResponse: either `markdown` or `ask_back` "
+                "must be non-empty"
+            )
+        return self
 
 
 # ─── Heuristics for code-side urgency classification ────────────────────
@@ -441,3 +504,53 @@ def classify_days_until_deadline(days: int | None) -> Urgency:
     if days <= MEDIUM_THRESHOLD.days:
         return Urgency.MEDIUM
     return Urgency.LOW
+
+
+# ─── Out-of-scope response (added 2026-06-25, sou request) ───────────
+
+
+class OutOfScopeResponse(BaseModel):
+    """Structured response when L1 classifies a query as out-of-scope.
+
+    Replaces the previous natural-language apology string that
+    ``run_lumi_query`` returned for OOS queries. The user-facing
+    surface should be a clean JSON object (callers can
+    ``.model_dump_json()`` it), not a flowery apology sentence —
+    sou's 2026-06-25 feedback was that the apology reads as
+    condescending and the JSON form is cleaner for the web UI
+    to render.
+
+    Fields:
+        out_of_scope: Always True. Sentinel so callers can branch
+            on the type without ``isinstance`` introspection.
+        reason: Short machine-readable reason for the OOS
+            classification. One of a small enum-like set:
+            ``travel_planning``, ``cooking``, ``shopping``,
+            ``weather``, ``general_chitchat``, ``other``.
+            Populated from ``IdentityProfile.oos_reason`` (which
+            L1 writes). When L1 fails to populate the field,
+            the orchestrator falls back to ``other``.
+        detected_topic: The noun phrase L1 detected in the user's
+            query that triggered the OOS classification (e.g.
+            "one day trip in Tokyo", "pizza recipe", "GPU").
+            Useful for the UI to display *what* Lumi understood
+            the user to be asking about, so the OOS rejection
+            feels specific rather than generic. Optional —
+            may be None when L1 didn't extract a clean topic.
+
+    Example:
+        >>> OutOfScopeResponse(reason="travel_planning", detected_topic="one day trip in tokyo").model_dump_json()
+        '{"out_of_scope":true,"reason":"travel_planning","detected_topic":"one day trip in tokyo"}'
+    """
+
+    out_of_scope: Literal[True] = True
+    reason: str = Field(
+        default="other",
+        max_length=50,
+        description="Machine-readable reason (travel_planning, cooking, etc.)",
+    )
+    detected_topic: str | None = Field(
+        default=None,
+        max_length=200,
+        description="The topic noun phrase L1 detected in the user query",
+    )

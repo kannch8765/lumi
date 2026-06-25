@@ -1,13 +1,14 @@
 """End-to-end pipeline integration test (real LLM, real MCP).
 
-These tests run the full L1 → L2 → L3 → L4 → ranker pipeline against the
+These tests run the full L1 → L2 → L3 → L4 pipeline against the
 real Gemini 3.1 Flash Lite model. They exercise the entire ADK
 orchestrator with no mocks, capturing:
 
 - **Real latency** (p50 / p95) for the Kaggle writeup §6
 - **Schema validation** at every layer (Pydantic caps, structure)
 - **Prompt-injection defense** (output should still be a valid
-  ``TimelineResult``, not a refusal or leaked payload)
+  ``TimelineResult`` / ``RecommendationResponse``, not a refusal
+  or leaked payload)
 - **Edge-case handling** (very short / non-AI queries)
 
 These tests are marked ``@pytest.mark.manual`` and skipped when
@@ -21,6 +22,12 @@ CI configuration (when added) should run with ``-m "not manual"`` to
 keep the Gemini free-tier daily quota reserved for dev + release work.
 
 Wall-clock budget: ~2-5 min for the full suite on Flash Lite free tier.
+
+Refactor 2026-06-24: pipeline is now 4 layers (L1 → L2 → L3 → L4).
+The former ``timeline_ranker`` + ``l5_synthesizer`` were absorbed
+into L4 Timeline + Finalize. End-to-end behavior is unchanged from
+the user's perspective — happy path still returns a
+``RecommendationResponse`` with markdown.
 """
 
 from __future__ import annotations
@@ -62,10 +69,11 @@ async def _pace_between_tests():
 
 
 # ─── Retry helper (Task #3) ──────────────────────────────────────────────
-# Free-tier Gemini allows 15 RPM. Sequential L1→L2→L3→L4→L5 means 5 LLM
-# calls per query; back-to-back e2e tests easily exceed quota and trip
-# transient 429 RESOURCE_EXHAUSTED. Wrap each ``run_lumi_query`` call with
-# ``_run_with_retry`` to absorb the backoff transparently.
+# Free-tier Gemini allows 15 RPM. Sequential L1→L2→L3→L4 means 4 LLM
+# calls per query (refactor 2026-06-24 dropped L5); back-to-back e2e
+# tests easily exceed quota and trip transient 429 RESOURCE_EXHAUSTED.
+# Wrap each ``run_lumi_query`` call with ``_run_with_retry`` to absorb
+# the backoff transparently.
 
 from google.genai.errors import ClientError as _GeminiClientError  # noqa: E402
 
@@ -253,19 +261,21 @@ async def test_e2e_edge_case_very_short_query() -> None:
 async def test_e2e_out_of_scope_returns_gracefully() -> None:
     """Out-of-scope: pizza recipe query.
 
-    Expect: pipeline does not crash. L1 should either:
-    - Refuse politely and produce an empty/minimal TimelineResult
-    - Or attempt to redirect to "AI for culinary applications" (creative)
-
-    Either way, output must be a valid TimelineResult, not an error.
+    Expect: pipeline does not crash. Refactor 2026-06-25: the OOS
+    path now returns an :class:`OutOfScopeResponse` (structured
+    JSON object), not a TimelineResult. The test just asserts the
+    pipeline didn't raise and that the response is a valid
+    OutOfScopeResponse with out_of_scope=True.
     """
+    from app.agents.schemas import OutOfScopeResponse
+
     result = await _run_with_retry(lambda: run_lumi_query(OUT_OF_SCOPE_QUERY))
 
-    _assert_valid_timeline(result)
-    # The output is allowed to be empty (refusal) or non-empty (redirect).
-    # We just want to ensure the pipeline didn't crash with an exception.
-    print(f"\n[OUT OF SCOPE] entries={len(result.ranked)}")
-    print(f"  Reasoning: {result.reasoning[:150]!r}")
+    assert isinstance(result, OutOfScopeResponse), (
+        f"expected OutOfScopeResponse, got {type(result).__name__}"
+    )
+    assert result.out_of_scope is True
+    print(f"\n[OUT OF SCOPE] reason={result.reason!r} topic={result.detected_topic!r}")
 
 
 # ─── Optional: latency baseline (skip by default, run with -v) ───────────
@@ -320,28 +330,39 @@ async def test_e2e_dump_sample_output_for_docs() -> None:
     # Always passes — this is a documentation helper.
 
 
-# ─── L5 Synthesizer E2E tests ───────────────────────────────────────────
+# ─── L4 Timeline + Finalize E2E tests (was: L5 Synthesizer) ───────────
+#
+# Refactor 2026-06-24: L5 was absorbed into L4. The happy-path
+# RecommendationResponse test below is unchanged in intent — L4
+# emits the same Pydantic schema that L5 used to emit.
 
 
 def _assert_valid_recommendation(result: RecommendationResponse) -> None:
     """Sanity-check a RecommendationResponse regardless of LLM non-determinism."""
 
     assert isinstance(result, RecommendationResponse)
-    # markdown: min_length=1, max_length=3000.
-    assert 1 <= len(result.markdown) <= 3000
+    # markdown is optional (None is allowed when ask_back is set);
+    # when present, bounded 1..3000 chars.
+    if result.markdown is not None:
+        assert 1 <= len(result.markdown) <= 3000
     # language: min_length=2, max_length=10 (BCP-47).
     assert 2 <= len(result.language) <= 10
     # follow_up is optional, but bounded if present.
     if result.follow_up is not None:
         assert 1 <= len(result.follow_up) <= 200
+    # ask_back is optional, but bounded if present.
+    if result.ask_back is not None:
+        assert 1 <= len(result.ask_back) <= 500
 
 
 async def test_e2e_happy_path_teen_japan_returns_recommendation() -> None:
     """Happy path: 16-year-old in Japan wants free AI courses.
 
-    Expect: pipeline runs through L5 Synthesizer and returns a
+    Expect: pipeline runs through L4 Timeline + Finalize (L4 absorbs
+    L5's emit responsibility as of 2026-06-24) and returns a
     ``RecommendationResponse`` with non-empty markdown. Latency budget
-    is 120s (L5 adds ~5-15s on top of the L1→L4 path).
+    is 120s (4 LLM calls now instead of 5; refactor dropped the
+    L5 layer).
     """
 
     t0 = time.perf_counter()
@@ -356,10 +377,11 @@ async def test_e2e_happy_path_teen_japan_returns_recommendation() -> None:
     assert latency < 120.0, f"Pipeline took {latency:.1f}s, expected <120s"
 
     print(
-        f"\n[L5 HAPPY PATH] latency={latency:.1f}s, "
-        f"markdown_len={len(result.markdown)}, language={result.language!r}"
+        f"\n[L4 HAPPY PATH] latency={latency:.1f}s, "
+        f"markdown_len={len(result.markdown) if result.markdown else 0}, "
+        f"language={result.language!r}"
     )
-    print(f"  Markdown snippet: {result.markdown[:150]!r}")
+    print(f"  Markdown snippet: {(result.markdown or '')[:150]!r}")
 
 
 async def test_e2e_no_age_triggers_l2_ask_back() -> None:
@@ -467,11 +489,13 @@ async def test_e2e_freshness_check_skips_l2_and_l3() -> None:
     )
 
 
-async def test_e2e_drill_down_only_runs_ranker() -> None:
-    """drill_down intent should skip L2 + L3 + L4, just run ranker (+ L5).
+async def test_e2e_drill_down_only_runs_l4() -> None:
+    """drill_down intent should skip L2 + L3, just run L4.
 
     Follow-up like "tell me more about fast.ai" should be the fastest
-    of the three non-OOS intents because most layers are skipped.
+    of the three non-OOS intents because L2/L3 are skipped. (Refactor
+    2026-06-24: L4 absorbed L5, so drill_down now runs only L4 —
+    ``target_agents=["l4_timeline"]``.)
     """
     t0 = time.perf_counter()
     baseline = await _run_with_retry(lambda: run_lumi_query(HAPPY_PATH_QUERY))
@@ -483,8 +507,8 @@ async def test_e2e_drill_down_only_runs_ranker() -> None:
     detail = await _run_with_retry(lambda: run_lumi_query("tell me more about fast.ai"))
     detail_latency = time.perf_counter() - t0
 
-    # drill_down may return a RecommendationResponse (L5 detail) or
-    # a TimelineResult — both are valid for the router's intent.
+    # drill_down may return a RecommendationResponse, an ask_back
+    # str, or a TimelineResult — all are valid for the router's intent.
     assert detail is not None
     print(
         f"\n[DRILL_DOWN] baseline={baseline_latency:.1f}s, "

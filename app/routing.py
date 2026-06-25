@@ -28,36 +28,37 @@ from __future__ import annotations
 
 # Sub-agent names that can appear in IdentityProfile.target_agents.
 # Order matches the pipeline order in create_lumi_pipeline().
+# Refactor 2026-06-24: timeline_ranker + l5_synthesizer dropped — L4
+# emits RecommendationResponse directly (URGENCY grouping + markdown
+# formatting absorbed from L5's instruction).
 LUMI_AGENT_NAMES: tuple[str, ...] = (
     "l2_eligibility",
     "l3_level",
     "l4_timeline",
-    "timeline_ranker",
-    "l5_synthesizer",
 )
 
 # Canonical intent -> target_agents mapping. Each L1 routing intent
 # narrows the set of downstream agents that need to run.
 #
-# - full_pipeline:    initial query, run the whole chain (no ranker
-#                     rename needed since ranker runs after L4)
-# - filter_only:      re-filter existing eligibility results; skip L2
+# - full_pipeline:    initial query, run L2 → L3 → L4 (4 LLM calls
+#                     total counting L1).
+# - filter_only:      re-filter existing eligibility results; skip L2.
 # - freshness_check:  re-check last_verified_free on existing picks;
-#                     skip L2 and L3
-# - drill_down:       return details on one specific resource; skip
-#                     L2/L3/L4, just run the ranker (and L5)
-# - out_of_scope:     no sub-agents; L1's apology is the final reply
+#                     skip L2 and L3.
+# - drill_down:       user wants details on a specific resource. Only
+#                     L4 runs — but with empty L3 matches, L4 will
+#                     fire its own ask_back. The orchestrator returns
+#                     that as a str.
+# - out_of_scope:     no sub-agents; L1's apology is the final reply.
 INTENT_TO_TARGET_AGENTS: dict[str, list[str]] = {
     "full_pipeline": [
         "l2_eligibility",
         "l3_level",
         "l4_timeline",
-        "timeline_ranker",
-        "l5_synthesizer",
     ],
-    "filter_only": ["l3_level", "l4_timeline", "timeline_ranker", "l5_synthesizer"],
-    "freshness_check": ["l4_timeline", "timeline_ranker", "l5_synthesizer"],
-    "drill_down": ["timeline_ranker", "l5_synthesizer"],
+    "filter_only": ["l3_level", "l4_timeline"],
+    "freshness_check": ["l4_timeline"],
+    "drill_down": ["l4_timeline"],
     "out_of_scope": [],
 }
 

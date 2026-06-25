@@ -38,7 +38,7 @@ be served by a static FAQ.
 
 ## What Lumi does
 
-A five-agent pipeline (L1–L5) that turns *"I'm a CS undergrad in Brazil, want
+A four-agent pipeline (L1–L4) that turns *"I'm a CS undergrad in Brazil, want
 to learn LLMs"* into a ranked shortlist of resources the user can
 **actually use this week** — filtered by eligibility, matched to skill
 level, annotated with deadlines and freshness.
@@ -49,16 +49,21 @@ flowchart TD
     L1["L1 Identity<br/>no tools — chat in / Pydantic out<br/>→ UserProfile"]
     L2["L2 Eligibility<br/>catalog MCP, 3 tools<br/>→ CandidateSet"]
     L3["L3 Level Filter<br/>catalog MCP, 3 tools<br/>→ MatchedSet"]
-    L4["L4 Timeline<br/>catalog + web-search MCPs<br/>→ FreshSet"]
-    Rank["Ranking<br/>code-only, no LLM<br/>sort by urgency → deadline → name"]
-    L5["L5 Synthesizer<br/>zero tools — chat in / Pydantic out<br/>→ markdown recommendation"]
-    Output(["Output<br/>urgency / topic / value / sequence views"])
+    L4["L4 Timeline + Finalize<br/>catalog + web-search MCPs<br/>→ markdown recommendation"]
+    Output(["Output<br/>urgency-grouped recommendation<br/>(CRITICAL → HIGH → MEDIUM → LOW → STALE)"])
 
-    User --> L1 --> L2 --> L3 --> L4 --> Rank --> L5 --> Output
+    User --> L1 --> L2 --> L3 --> L4 --> Output
 ```
 
-Full architecture (per-layer details, MCP tool filters, schema contracts,
-ranker algorithm) lives in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+> **Refactor 2026-06-24:** The pipeline is now 4 layers (L1 → L2 → L3 → L4).
+> The former timeline ranker + L5 Synthesizer were absorbed into L4
+> Timeline + Finalize. See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the
+> full design.
+
+Full architecture (per-layer details, MCP tool filters, schema contracts)
+lives in [`ARCHITECTURE.md`](./ARCHITECTURE.md). The
+`app/ranking.py` library is retained for a future real-time web-search
+deployment.
 
 ## Why an agent (not a website)
 
@@ -213,7 +218,7 @@ gcloud artifacts repositories delete lumi --location=us-central1
 
 | Document | Purpose |
 |---|---|
-| [`ARCHITECTURE.md`](./ARCHITECTURE.md) | Full architecture, per-layer details, MCP tool filters, ranker algorithm |
+| [`ARCHITECTURE.md`](./ARCHITECTURE.md) | Full architecture, per-layer details, MCP tool filters, ask_back pattern |
 | [`CONTEXT.md`](./CONTEXT.md) | Hard rules every contributor must follow (incl. AI agents writing code) |
 | [`TECH_STACK.md`](./TECH_STACK.md) | Tech choices + rationale (Python 3.12, ADK, MCP, uv, semgrep, pre-commit) |
 | [`threat_model.md`](./threat_model.md) | 41-row STRIDE catalog — the spec the test suite asserts against |

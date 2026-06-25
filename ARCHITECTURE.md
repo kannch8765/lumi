@@ -4,7 +4,7 @@
 > (courses, competitions, API credits, GPU resources) by removing
 > financial, geographic, and informational barriers.
 
-## Agent Pipeline (6-layer sequential, parallel output)
+## Agent Pipeline (4-layer sequential)
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
@@ -43,30 +43,12 @@
               ╚═════════════╤═════════════╝
                             ↓
               ╔═══════════════════════════╗
-              ║  L4: TIMELINE AGENT       ║  ← "Is this fresh?"
-              ║  ─────────────────────── ║
-              ║  Flags deadlines,         ║
-              ║  freshness, "closes in    ║
-              ║  3 days" labels.          ║
-              ║  Output: FreshSet         ║
-              ╚═════════════╤═════════════╝
-                            ↓
-              ╔═══════════════════════════╗
-              ║  OUTPUT: RANKED LIST      ║  ← PARALLEL ranking
-              ║  ─────────────────────── ║
-              ║  Multiple sort strategies ║
-              ║  run in parallel:         ║
-              ║   - by urgency            ║
-              ║   - by topic              ║
-              ║   - by value saved        ║
-              ║   - by learning sequence  ║
-              ╚═════════════╤═════════════╝
-                            ↓
-              ╔═══════════════════════════╗
-              ║  L5: SYNTHESIZER AGENT    ║  ← "What should I say?"
-              ║  ─────────────────────── ║
-              ║  Zero tools. Reads typed  ║
-              ║  session state, emits a   ║
+              ║  L4: TIMELINE + FINALIZE  ║  ← "Is this fresh? What
+              ║  ─────────────────────── ║     should I say?"
+              ║  Annotates deadlines,     ║
+              ║  freshness, and emits     ║
+              ║  the user-facing markdown ║
+              ║  recommendation as a      ║
               ║  structured               ║
               ║  RecommendationResponse   ║
               ║  (markdown + language +   ║
@@ -84,18 +66,23 @@ flowchart TD
     L1["L1 Identity<br/>no tools — chat in / Pydantic out<br/>→ UserProfile"]
     L2["L2 Eligibility<br/>catalog MCP, 3 tools<br/>→ CandidateSet"]
     L3["L3 Level Filter<br/>catalog MCP, 3 tools<br/>→ MatchedSet"]
-    L4["L4 Timeline<br/>catalog + web-search MCPs<br/>→ FreshSet"]
-    Rank["Ranking<br/>code-only, no LLM<br/>sort by urgency → deadline → name"]
-    L5["L5 Synthesizer<br/>no tools — reads typed state<br/>→ RecommendationResponse<br/>(markdown + language + follow_up)"]
-    Output(["Output<br/>urgency / topic / value / sequence views"])
+    L4["L4 Timeline + Finalize<br/>catalog + web-search MCPs<br/>→ RecommendationResponse<br/>(markdown + language + follow_up)"]
+    Output(["Output<br/>natural-language recommendation<br/>(skill-level grouping + Start-here callout)"])
 
-    User --> L1 --> L2 --> L3 --> L4 --> Rank --> L5 --> Output
+    User --> L1 --> L2 --> L3 --> L4 --> Output
 ```
 
-The same six-stage shape is enforced in code by
-`app/orchestrator.py:create_lumi_pipeline` (`SequentialAgent` with six
+The same four-stage shape is enforced in code by
+`app/orchestrator.py:create_lumi_pipeline` (`SequentialAgent` with four
 sub-agents in fixed order). The orchestrator itself holds NO tools
 (CONTEXT.md #10 — the tool whitelist is the kill switch).
+
+> **Refactor 2026-06-24:** The pipeline is now 4 layers (L1 → L2 → L3 → L4).
+> The former timeline ranker (code-only sort) and L5 Synthesizer (markdown
+> emit) were absorbed into L4 Timeline + Finalize. See commit on branch
+> `refactor/stop-at-l4` for the full diff. `app/ranking.py` is retained
+> as a library for a future real-time web-search deployment where deadline
+> ranking matters (Phase G / Task 33).
 
 ### L1: Identity Agent
 
@@ -148,58 +135,98 @@ sub-agents in fixed order). The orchestrator itself holds NO tools
   - Guarantee continued availability
   - Reserve seats or queue on behalf of user
 
-### L5: Synthesizer Agent
+### L4: Timeline + Finalize Agent (combined)
 
-L5 is the only L-layer that produces user-facing natural language.
-It reads the sorted timeline plus the user's identity profile and
-emits a structured `RecommendationResponse` (markdown body + ISO
-639-1 language tag + optional follow-up question). The CLI and
-FastAPI surfaces render the `markdown` field directly.
+L4 is the 4th and final L-layer. It combines two responsibilities
+that used to live in two separate agents:
+
+1. **Timeline annotation** — flags deadlines, freshness,
+   "closes in N days" labels, and a per-entry `recommended_action`.
+2. **User-facing markdown emit** (absorbed from the former L5
+   Synthesizer on 2026-06-24) — reads the L3 LevelFilterResult
+   plus the user's identity profile and emits a structured
+   `RecommendationResponse` (markdown body + ISO 639-1 language tag
+   + optional follow-up question). The CLI and FastAPI surfaces
+   render the `markdown` field directly.
 
 #### Pipeline position
 
-L5 is the 6th and final layer. It runs AFTER the timeline ranker
-and BEFORE the pipeline returns to the user. Skip behavior:
+L4 is the 4th and final layer. Skip behavior:
 
-- L5's `before_agent_callback` skips L5 if `state['ask_back']` is
+- L4's `before_agent_callback` skips L4 if `state['ask_back']` is
   set (an earlier layer fired ask_back and the question is the
   final reply).
-- L5's `before_agent_callback` also skips L5 if
-  `l5_synthesizer` is not in `state['identity']['target_agents']`
-  (L1 routed away).
+- L4's `before_agent_callback` also skips L4 if
+  `l4_timeline` is not in `state['identity']['target_agents']`
+  (L1 routed away — e.g. ``intent=out_of_scope`` or the intent is
+  purely a small-talk ack).
 
 #### Input
 
-L5 reads:
+L4 reads:
+- `state['level_filter']` — the L3 LevelFilterResult.
 - `state['identity']` — the user's profile (language preference,
-  etc.).
-- `state['ranked_timeline']` — the sorted TimelineResult from the
-  ranker.
+  education_level, etc.).
 
 #### Output
 
 `RecommendationResponse` (see `app/agents/schemas.py`):
-- `markdown: str` (1..3000 chars) — the user-facing recommendation.
+- `markdown: str | None` (1..3000 chars) — the user-facing
+  recommendation. Nullable: when ``ask_back`` is set instead, the
+  pipeline short-circuits to that clarification question.
 - `language: str` (2..10 chars) — ISO 639-1 / BCP-47 code.
-- `follow_up: str | None` (≤200 chars) — optional follow-up question.
+- `follow_up: str | None` (≤200 chars) — optional follow-up
+  question.
+- `ask_back: str | None` (≤500 chars) — short clarification
+  question, mutually exclusive with ``markdown`` (the
+  ``_validate_either_field`` model_validator enforces that at
+  least one is set).
+
+#### Markdown format (user-facing)
+
+The `markdown` field is **natural language**, not a debug dump.
+Per sou's 2026-06-25 feedback, internal urgency classification
+(`CRITICAL` / `HIGH` / `MEDIUM` / `LOW` / `STALE`) is **never**
+exposed in the user-facing reply — the user doesn't care about
+internal buckets, and showing them looks like a broken classifier.
+
+Format rules (L4 instruction):
+- Open with a 1-2 sentence intro that names the strongest match
+  (e.g. "For learning LLMs hands-on, the Hugging Face course is
+  a great starting point...").
+- Group by **skill level** only when 3+ resources share a level
+  (`## Beginner-friendly`, `## Intermediate`, `## Advanced`).
+- If the user is pre-coding (no `education_level` set OR no coding
+  keywords in goals/interests) AND the candidate set contains
+  `type == "explainer"` resources, lead with a "Start here (no
+  coding setup needed):" callout listing the explainers first.
+- Each entry: ``- [Resource Name](url) — one-line rationale``.
+  Lead with the *practical* reason it fits THIS user (language,
+  location, prior skills), not the urgency bucket.
+- The `follow_up` is a *next step* the user might want, NOT a meta
+  question about the data.
+- URLs are copied verbatim from `state['level_filter']` or the
+  catalog MCP `get_resource_by_id` output. No invented URLs.
 
 #### Security model
 
-- **Zero tools** (CONTEXT.md #10). L5 cannot browse, cannot call
-  the catalog, cannot search the web. It reads typed session state
-  and emits structured output only.
+- **Tool whitelist** (CONTEXT.md #10). L4 uses ONLY the resource-
+  catalog MCP + web-search MCP via the ``McpToolset`` allow-list.
+  L4 cannot browse arbitrary URLs, cannot pay, cannot create
+  accounts.
 - **Refusal-pattern scrub.** Pydantic
   `RecommendationResponse._scrub_refusal_patterns` rejects any
   markdown containing "system prompt", "my instructions", or
   "instruction zone" (case-insensitive) — CONTEXT.md #19.
 - **No PII echo.** The INSTRUCTION zone explicitly forbids echoing
   the user's age, location, or education_level into the reply.
-- **URLs are copied verbatim** from `state['ranked_timeline']`.
-  No invented URLs.
-- **Fallback path.** If L5's structured output fails validation
-  (length cap, refusal-pattern scrub), the
-  `after_agent_callback` falls back to a code-rendered markdown
-  summary built directly from `state['ranked_timeline']`.
+- **URLs are copied verbatim** from ``state['level_filter']`` or
+  the catalog MCP ``get_resource_by_id`` output. No invented URLs.
+- **Fallback path.** If L4's structured output fails validation
+  (length cap, refusal-pattern scrub, missing-either-field), the
+  ``_l4_finalize_after_agent`` callback falls back to a
+  code-rendered markdown summary built directly from
+  ``state['level_filter']``.
 
 ## Ask-back pattern
 
@@ -249,22 +276,19 @@ the apology IS the user reply, same as the OOS path.
 
 ### Pipeline orchestrator (`app/orchestrator.py`)
 
-The six sub-agents are wired by `google.adk.agents.SequentialAgent`
+The four sub-agents are wired by `google.adk.agents.SequentialAgent`
 in `create_lumi_pipeline()`. Session state keys chain: `identity`
-→ `eligibility` → `level_filter` → `timeline` → `ranked_timeline`
-→ `final_recommendation`. A code-only ranking step (an `LlmAgent`
-shell with an `after_agent_callback` wrapping
-`app.ranking.py:rank_timeline_entries`) sorts the L4 output by
-urgency, deadline proximity, and resource name. L5 (Synthesizer)
-turns the ranked timeline into a user-facing markdown reply.
+→ `eligibility` → `level_filter` → `final_recommendation`.
+L4 (Timeline + Finalize) writes the user-facing markdown
+``RecommendationResponse`` directly; the former code-only ranking
+step is retained as a library (`app/ranking.py`) for a future
+real-time web-search deployment but is not currently wired in.
 
 The orchestrator itself has **no tools** — it is pure delegation
 (CONTEXT.md #10 — tool whitelist is the kill switch).
 
 Known tech debt: `SequentialAgent` is deprecated in ADK 2.x in
-favor of `Workflow`. The pipeline shape migrates cleanly; the
-ranker-as-LlmAgent trick may need a `BaseAgent` subclass after the
-migration.
+favor of `Workflow`. The pipeline shape migrates cleanly.
 
 ### `run_lumi_query` short-circuit order
 
@@ -273,26 +297,22 @@ migration.
 in the following order wins:
 
 1. **`state['ask_back']`** — set by an L-layer's
-   `after_agent_callback` when the structured output contains a
-   non-empty `ask_back` field. Returns the clarification question
-   as a `str`.
-2. **`state['final_user_response']`** — set by the ranker callback
-   when L1 marked the query as `out_of_scope`. Returns the apology
-   as a `str`.
-3. **`state['final_recommendation']`** — set by L5's `output_key`.
+   `after_agent_callback` (or L4's ``_l4_finalize_after_agent``)
+   when the structured output contains a non-empty `ask_back`
+   field. Returns the clarification question as a `str`.
+2. **`state['final_user_response']`** — set by L1's
+   `after_agent_callback` when L1 marked the query as
+   `out_of_scope`. Returns the apology as a `str`.
+3. **`state['final_recommendation']`** — set by L4's `output_key`.
    Returns a `RecommendationResponse` (markdown + language +
-   follow_up).
-4. **`state['ranked_timeline']`** — set by the ranker's
-   `after_agent_callback`. Returns a sorted `TimelineResult`.
-5. **`state['timeline']`** — fallback for callers that ran only
-   the first 4 layers. Returns a sorted `TimelineResult`.
-6. Empty `TimelineResult()` — last-resort default so callers
+   follow_up or ask_back).
+4. Empty `TimelineResult()` — last-resort default so callers
    always receive a structured payload.
 
-## Parallel Output Stage
+## Code-only ranking library (kept for future)
 
-The output ranking is **deterministic and code-only** (no LLM in the
-loop). `app/ranking.py` exposes two pure functions:
+`app/ranking.py` exposes two pure functions and is **not currently
+wired into the orchestrator**:
 
 - `rank_timeline_entries(result)` — returns a new `TimelineResult`
   with `ranked` sorted by (urgency, days_until_deadline, name).
@@ -301,9 +321,9 @@ loop). `app/ranking.py` exposes two pure functions:
 - `explain_ranking(result)` — returns a one-line-per-entry
   human-readable summary for the UI.
 
-This stage runs as a `SequentialAgent`'s `after_agent_callback`, so
-the orchestrator's wall-clock cost is bounded by the slowest
-agent's MCP round-trip + O(n log n) sort time.
+The library is retained for a future real-time web-search deployment
+where deadline ranking matters (Phase G / Task 33). The unit tests
+in `tests/unit/test_ranking.py` keep the sort algorithm honest.
 
 Multiple ranking strategies can run in parallel and merge:
 

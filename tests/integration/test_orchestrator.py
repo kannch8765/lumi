@@ -11,6 +11,10 @@ Per CONTEXT.md #7 there are no mocks. We assert only on ADK object
 shape (type, name, ``output_key``, presence of the callback) so the
 tests stay useful even when the agent factories evolve their
 internal model wiring.
+
+Refactor 2026-06-24: the pipeline is now 4 layers (L1 → L2 → L3 →
+L4) — the former ``timeline_ranker`` (code-only sort) and
+``l5_synthesizer`` (markdown emit) layers were absorbed into L4.
 """
 
 from __future__ import annotations
@@ -25,8 +29,6 @@ from app.orchestrator import (
     STATE_KEY_ELIGIBILITY,
     STATE_KEY_IDENTITY,
     STATE_KEY_LEVEL_FILTER,
-    STATE_KEY_RANKED_TIMELINE,
-    STATE_KEY_TIMELINE,
     create_lumi_pipeline,
     run_lumi_query,
 )
@@ -50,20 +52,20 @@ def test_pipeline_name_is_lumi_pipeline() -> None:
     assert pipeline.name == "lumi_pipeline"
 
 
-def test_pipeline_has_six_sub_agents() -> None:
-    """The pipeline has exactly six sub-agents: L1, L2, L3, L4, ranker, L5.
+def test_pipeline_has_four_sub_agents() -> None:
+    """The pipeline has exactly four sub-agents: L1, L2, L3, L4.
 
-    L5 (the Synthesizer) was added so the CLI surfaces a final
-    markdown recommendation instead of raw JSON dumps. See
-    ``app/agents/l5_synthesizer.py``.
+    Refactor 2026-06-24: the former ``timeline_ranker`` (code-only
+    sort) and ``l5_synthesizer`` (markdown emit) layers were
+    absorbed into L4 Timeline + Finalize. See the
+    ``refactor/stop-at-l4`` branch.
     """
     pipeline = create_lumi_pipeline()
-    assert len(pipeline.sub_agents) == 6
+    assert len(pipeline.sub_agents) == 4
 
 
 def test_pipeline_sub_agents_are_in_correct_order() -> None:
-    """Sub-agents appear in the canonical order L1 → L2 → L3 → L4 →
-    ranker → L5.
+    """Sub-agents appear in the canonical order L1 → L2 → L3 → L4.
 
     ARCHITECTURE.md §Agent Pipeline mandates the order; if this test
     ever fails, the security model has been silently broken (a
@@ -76,8 +78,6 @@ def test_pipeline_sub_agents_are_in_correct_order() -> None:
         "l2_eligibility",
         "l3_level",
         "l4_timeline",
-        "timeline_ranker",
-        "l5_synthesizer",
     ]
 
 
@@ -93,6 +93,11 @@ def test_pipeline_sub_agents_use_documented_output_keys() -> None:
 
     Downstream layers (and the orchestrator) read from these keys,
     so they must be stable and explicit.
+
+    Refactor 2026-06-24: L4 writes ``"final_recommendation"``
+    (RecommendationResponse) instead of the former
+    ``"timeline"`` (TimelineResult) — L4 absorbed L5's emit
+    responsibility.
     """
     pipeline = create_lumi_pipeline()
     keys = [agent.output_key for agent in pipeline.sub_agents]
@@ -100,8 +105,6 @@ def test_pipeline_sub_agents_use_documented_output_keys() -> None:
         STATE_KEY_IDENTITY,
         STATE_KEY_ELIGIBILITY,
         STATE_KEY_LEVEL_FILTER,
-        STATE_KEY_TIMELINE,
-        STATE_KEY_RANKED_TIMELINE,
         "final_recommendation",
     ]
 
@@ -126,19 +129,18 @@ def test_pipeline_orchestrator_has_no_tools() -> None:
     assert not getattr(pipeline, "tools", [])
 
 
-def test_ranker_sub_agent_has_after_agent_callback() -> None:
-    """The ranker sub-agent is wired to a non-trivial
-    ``after_agent_callback`` — that callback is what does the real
-    ranking work (ARCHITECTURE.md §Parallel Output Stage).
-
-    Note: with L5 added, the ranker is no longer the last sub-agent.
-    We locate it by name.
+def test_l4_sub_agent_has_after_agent_callback() -> None:
+    """The L4 sub-agent has an ``after_agent_callback`` wired in by
+    default — that callback surfaces the Pydantic ``markdown`` as
+    the user-visible turn and falls back to a code-rendered
+    summary if validation fails (refactor 2026-06-24: L4 absorbed
+    L5's emit responsibility, so this is where the markdown
+    finalize lives now).
     """
     pipeline = create_lumi_pipeline()
-    ranker = next(a for a in pipeline.sub_agents if a.name == "timeline_ranker")
-    callback = ranker.after_agent_callback
+    l4 = next(a for a in pipeline.sub_agents if a.name == "l4_timeline")
+    callback = l4.after_agent_callback
     assert callback is not None
-    # The callback must be callable (ADK invokes it on agent completion).
     assert callable(callback)
 
 
@@ -151,7 +153,7 @@ def test_pipeline_accepts_model_override() -> None:
     """
     pipeline = create_lumi_pipeline(model="gemini-2.5-pro")
     assert pipeline.name == "lumi_pipeline"
-    assert len(pipeline.sub_agents) == 6
+    assert len(pipeline.sub_agents) == 4
 
 
 # ── Public surface ─────────────────────────────────────────────────────
@@ -167,12 +169,14 @@ def test_run_lumi_query_is_callable() -> None:
 def test_run_lumi_query_signature_accepts_single_query_string() -> None:
     """``run_lumi_query`` takes a single ``query: str`` argument.
 
-    Returns one of three types, discriminated by content:
+    Returns one of four types, discriminated by ``isinstance``:
     - :class:`TimelineResult` — structured ranked list (fallback path).
     - :class:`RecommendationResponse` — final user-facing
-      recommendation (happy path through L5).
-    - ``str`` — apology (out_of_scope) or ask_back clarification
-      question (insufficient user info).
+      recommendation (happy path through L4).
+    - :class:`OutOfScopeResponse` — structured JSON OOS card
+      (refactor 2026-06-25, was a ``str`` apology before).
+    - ``str`` — ask_back clarification question (insufficient
+      user info).
     """
     sig = inspect.signature(run_lumi_query)
     params = list(sig.parameters.values())
@@ -183,7 +187,9 @@ def test_run_lumi_query_signature_accepts_single_query_string() -> None:
     assert params[0].annotation == "str"
     # The return union is the API contract — callers ``isinstance``-
     # check to decide which path to render.
-    assert sig.return_annotation == ("TimelineResult | RecommendationResponse | str")
+    assert sig.return_annotation == (
+        "TimelineResult | RecommendationResponse | OutOfScopeResponse | str"
+    )
 
 
 # ── ValidationError fallback (Bug #7) ──────────────────────────────────
