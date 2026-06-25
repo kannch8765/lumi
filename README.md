@@ -10,7 +10,8 @@ A multi-agent system built for the
 
 Author: [`kannch8765`](https://github.com/kannch8765) · Repo:
 [`github.com/kannch8765/lumi`](https://github.com/kannch8765/lumi) ·
-Writeup: [`writeup/WRITEUP.md`](./writeup/WRITEUP.md)
+Writeup: [`writeup/WRITEUP_KAGGLE.md`](./writeup/WRITEUP_KAGGLE.md) (1,982 words · Kaggle submission) ·
+Full: [`writeup/WRITEUP.md`](./writeup/WRITEUP.md) (7,324 words · repo docs)
 
 ---
 
@@ -46,24 +47,27 @@ level, annotated with deadlines and freshness.
 ```mermaid
 flowchart TD
     User(["User query<br/>'CS undergrad in Brazil,<br/>want to learn LLMs'"])
-    L1["L1 Identity<br/>no tools — chat in / Pydantic out<br/>→ UserProfile"]
+    L1["L1 Identity<br/>no tools — chat in / Pydantic out<br/>→ IdentityProfile"]
     L2["L2 Eligibility<br/>catalog MCP, 3 tools<br/>→ CandidateSet"]
     L3["L3 Level Filter<br/>catalog MCP, 3 tools<br/>→ MatchedSet"]
-    L4["L4 Timeline + Finalize<br/>catalog + web-search MCPs<br/>→ markdown recommendation"]
-    Output(["Output<br/>urgency-grouped recommendation<br/>(CRITICAL → HIGH → MEDIUM → LOW → STALE)"])
+    L4["L4 Timeline + Finalize<br/>catalog + web-search MCPs<br/>→ RecommendationResponse"]
+    Output(["Output<br/>natural-language recommendation<br/>(skill-level grouping + 'Start here' callout)"])
 
     User --> L1 --> L2 --> L3 --> L4 --> Output
 ```
 
-> **Refactor 2026-06-24:** The pipeline is now 4 layers (L1 → L2 → L3 → L4).
-> The former timeline ranker + L5 Synthesizer were absorbed into L4
-> Timeline + Finalize. See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the
-> full design.
+> **Refactor 2026-06-24:** Pipeline is 4 layers (L1 → L2 → L3 → L4). The
+> former timeline ranker + L5 Synthesizer were absorbed into L4 Timeline
+> + Finalize. URGENCY buckets (CRITICAL/HIGH/MEDIUM/LOW/STALE) are kept
+> as **internal classification only** — the user-facing markdown uses
+> natural language, never bucket headers (sou 2026-06-25 feedback).
+> See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full design.
 
 Full architecture (per-layer details, MCP tool filters, schema contracts)
-lives in [`ARCHITECTURE.md`](./ARCHITECTURE.md). The
-`app/ranking.py` library is retained for a future real-time web-search
-deployment.
+lives in [`ARCHITECTURE.md`](./ARCHITECTURE.md). The `app/ranking.py`
+library is **retained for future Phase G** (real-time web-search
+deployment) but is **not wired into the orchestrator** — L4 emits
+`RecommendationResponse` directly.
 
 ## Why an agent (not a website)
 
@@ -114,7 +118,7 @@ EOF
 ### Run — three ways
 
 ```bash
-# 1. Single-query CLI (full pipeline, ~30-60s)
+# 1. Single-query CLI (full pipeline, ~10-15s for 4 layers)
 uv run adk run app/agents "I'm a high school student in Brazil, want to learn ML free"
 
 # 2. Browser chat UI (FastAPI + ADK web UI on http://localhost:8000/dev-ui)
@@ -139,56 +143,65 @@ lumi/
 ├── CONTEXT.md                 # Hard rules for every contributor (incl. AI agents)
 ├── TECH_STACK.md              # Tech choices + rationale
 ├── threat_model.md            # 41-row STRIDE catalog
+├── LICENSE                    # MIT License (Copyright 2026 Sou)
 ├── writeup/
-│   ├── WRITEUP.md             # Kaggle writeup (Sections 1-5 implemented; 6-7 next)
+│   ├── WRITEUP.md             # Full 7,324-word design narrative (repo docs)
+│   ├── WRITEUP_KAGGLE.md      # Kaggle submission version (1,982 words, ≤ 2,000 cap)
+│   ├── KAGGLE_SUBMISSION.md   # Copy-paste cheat sheet for the Kaggle web form
+│   ├── VIDEO_STORYBOARD.md    # 5-beat video storyboard
+│   ├── ASCII_DIAGRAMS.md      # ASCII architecture diagrams
+│   ├── cover_horizontal.png   # 16:9 Kaggle cover (2000x1126, 80 KB)
+│   ├── cover.pptx             # Editable cover source (pptxgenjs)
+│   ├── cover.png              # Vertical cover (legacy)
 │   └── kaggle_competition_brief.md
 ├── app/
 │   ├── orchestrator.py        # create_lumi_pipeline() — SequentialAgent factory
-│   ├── ranking.py             # rank_timeline_entries() — code-only sort
-│   ├── fast_api_app.py        # Cloud Run entry point
+│   ├── ranking.py             # Library — code-only sort, retained for Phase G (not wired in)
 │   ├── agents/
 │   │   ├── agent.py           # root_agent = create_lumi_pipeline() (ADK CLI discovery)
-│   │   ├── l1_identity.py     # Layer 1
-│   │   ├── l2_eligibility.py  # Layer 2
-│   │   ├── l3_level.py        # Layer 3
-│   │   ├── l4_timeline.py     # Layer 4
-│   │   ├── l5_synthesizer.py  # Layer 5 (final markdown recommendation)
+│   │   ├── l1_identity.py     # Layer 1 — IdentityProfile + intent routing
+│   │   ├── l2_eligibility.py  # Layer 2 — country/age/institution/language rules
+│   │   ├── l3_level.py        # Layer 3 — fit_score [0.0, 1.0]
+│   │   ├── l4_timeline.py     # Layer 4 — timeline + final markdown emit
 │   │   ├── schemas.py         # Pydantic contracts (IdentityProfile, EligibilityResult, ...)
 │   │   └── _tool_filters.py   # MCP tool whitelists (kill switch)
 │   └── mcp_servers/
-│       ├── resource_catalog/  # Curated catalog MCP (50 free resources)
+│       ├── resource_catalog/  # Curated catalog MCP (60 free resources)
 │       └── web_search/        # Bounded search MCP (snippet-only)
 ├── tests/
-│   ├── unit/                  # 363 unit + integration tests (Pydantic, MCP servers, injection defenses)
-│   ├── integration/
-│   │   └── test_pipeline_e2e.py  # End-to-end happy path (real Gemini call)
-│   └── eval/                  # Outcome assertions per Kaggle brief
+│   ├── unit/                  # 380 unit + integration tests (Pydantic, MCP servers, injection defenses)
+│   └── integration/
+│       ├── test_pipeline_e2e.py    # End-to-end happy path (real Gemini call)
+│       ├── test_l1_router.py       # Intent routing + target_agents
+│       ├── test_orchestrator.py    # Pipeline wiring + sub-agent order
+│       ├── test_ask_back_callback.py # ask_back short-circuit
+│       └── test_catalog_loading.py # Catalog MCP load
 ├── deploy/
 │   ├── deploy.sh              # Cloud Run deploy script (test-deploy-then-tear-down)
 │   └── README.md              # Deploy runbook + 5 real gotchas
 ├── resources/
-│   └── catalog.jsonl          # 60 curated entries (50 standard + 10 absolute-beginner explainers)
-├── scripts/pre_commit_hooks/  # lumi-guard (author + banned paths)
+│   └── catalog.json           # 60 curated entries (50 standard + 10 absolute-beginner explainers)
+├── scripts/pre_commit_hooks/  # lumi_guard (author + banned paths + personal-info scrub)
 ├── cloudbuild.yaml            # Cloud Build → Artifact Registry → Cloud Run
 ├── Dockerfile                 # uv-based container, MCP stdio subprocesses via sys.executable
 ├── pyproject.toml
-└── .pre-commit-config.yaml    # 9 hooks (ruff, semgrep, pytest, lumi-guard)
+└── .pre-commit-config.yaml    # 9 hooks (ruff, semgrep, pytest, lumi_guard)
 ```
 
 ## Testing
 
 ```bash
-# Unit + integration tests (363 passed, 9 deselected for E2E + manual)
+# Unit + integration tests (380 passed, 12 deselected for E2E + manual)
 uv run pytest -m "not manual" -q
 
-# Pre-commit hooks (9 hooks: ruff, semgrep, pytest, lumi-guard)
+# Pre-commit hooks (9 hooks: ruff, semgrep, pytest, lumi_guard)
 uv run pre-commit run --all-files
 
 # Adversarial injection tests (per L-layer)
-uv run pytest tests/unit/test_l1_injection.py -v
-uv run pytest tests/unit/test_l2_injection.py -v
-uv run pytest tests/unit/test_l3_injection.py -v
-uv run pytest tests/unit/test_l4_injection.py -v
+uv run pytest tests/unit/test_l1_prompt_injection.py -v
+uv run pytest tests/unit/test_l2_prompt_injection.py -v
+uv run pytest tests/unit/test_l3_prompt_injection.py -v
+uv run pytest tests/unit/test_l4_prompt_injection.py -v
 ```
 
 ## Deployment
@@ -222,9 +235,11 @@ gcloud artifacts repositories delete lumi --location=us-central1
 | [`CONTEXT.md`](./CONTEXT.md) | Hard rules every contributor must follow (incl. AI agents writing code) |
 | [`TECH_STACK.md`](./TECH_STACK.md) | Tech choices + rationale (Python 3.12, ADK, MCP, uv, semgrep, pre-commit) |
 | [`threat_model.md`](./threat_model.md) | 41-row STRIDE catalog — the spec the test suite asserts against |
-| [`writeup/WRITEUP.md`](./writeup/WRITEUP.md) | Kaggle writeup — design narrative + lessons learned |
+| [`writeup/WRITEUP.md`](./writeup/WRITEUP.md) | Full 7,324-word design narrative (repo docs) |
+| [`writeup/WRITEUP_KAGGLE.md`](./writeup/WRITEUP_KAGGLE.md) | Kaggle submission writeup (1,982 words, ≤ 2,000 cap) |
 | [`deploy/README.md`](./deploy/README.md) | Cloud Run deploy runbook + 5 real gotchas |
 
 ## License
 
-TBD (Apache 2.0 likely, matching the secure-agent-lab codelab).
+[MIT](./LICENSE) — Copyright 2026 Sou. Free to use, modify, and distribute
+with attribution.
