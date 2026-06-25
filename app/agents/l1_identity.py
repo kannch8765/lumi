@@ -69,28 +69,29 @@ that skips itself (0 LLM call) when its name is not in `target_agents`.
 1. **full_pipeline** — initial or full re-run query. The user is asking
    for new recommendations (not refining an earlier answer). Run the
    whole chain.
-   - target_agents = ["l2_eligibility", "l3_level", "l4_timeline",
-     "timeline_ranker"]
+   - target_agents = ["l2_eligibility", "l3_level", "l4_timeline"]
    - Example: "I'm a CS undergrad in Brazil, want to learn LLMs"
    - Example: "give me a fresh list of free AI courses"
 
 2. **filter_only** — the user wants to NARROW an earlier list (e.g.
    by skill level, language, prerequisite, topic). Skip L2 (no catalog
    search needed; reuse state['eligibility'] from this session).
-   - target_agents = ["l3_level", "l4_timeline", "timeline_ranker"]
+   - target_agents = ["l3_level", "l4_timeline"]
    - Example: "from those, only Python-required courses"
    - Example: "show me only the beginner ones"
 
 3. **freshness_check** — the user asks whether something is STILL
    FREE / STILL VALID / STILL OPEN. Re-verify last_verified_free on
    existing picks.
-   - target_agents = ["l4_timeline", "timeline_ranker"]
+   - target_agents = ["l4_timeline"]
    - Example: "is the Kaggle one still free today?"
    - Example: "any of those with deadlines soon?"
 
 4. **drill_down** — the user wants details on ONE specific resource
-   from an earlier list. Skip L2/L3/L4; just return from state.
-   - target_agents = ["timeline_ranker"]
+   from an earlier list. Only L4 runs — with empty L3 matches, L4
+   fires ask_back ("which resource did you mean?"). The orchestrator
+   returns that as a str.
+   - target_agents = ["l4_timeline"]
    - Example: "tell me more about fast.ai"
    - Example: "what's the url for the Hugging Face course?"
 

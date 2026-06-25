@@ -17,6 +17,11 @@ a duck-typed object is sufficient.
 
 Per CONTEXT.md #7 — no mocks of the production code; we exercise the
 real factory functions with synthetic state.
+
+Refactor 2026-06-24: the pipeline is now 4 layers (L1 → L2 → L3 → L4).
+The former ``timeline_ranker`` + ``l5_synthesizer`` were absorbed into
+L4 Timeline + Finalize. The skip-callback agent name used in these
+tests is now ``"l4_timeline"`` instead of ``"l5_synthesizer"``.
 """
 
 from __future__ import annotations
@@ -146,9 +151,13 @@ def test_ask_back_callback_no_state_attribute() -> None:
 
 def test_should_i_run_callback_skips_when_ask_back_pending() -> None:
     """When ``state['ask_back']`` is set, the callback returns empty
-    ``Content`` to skip the agent (zero LLM calls)."""
+    ``Content`` to skip the agent (zero LLM calls).
 
-    cb = _make_should_i_run_callback("l5_synthesizer")
+    Refactor 2026-06-24: the downstream agent is now ``l4_timeline``
+    (was ``l5_synthesizer`` pre-refactor).
+    """
+
+    cb = _make_should_i_run_callback("l4_timeline")
     ctx = _FakeCtx({STATE_KEY_ASK_BACK: "share your age"})
 
     out = _run(cb(ctx))
@@ -159,9 +168,14 @@ def test_should_i_run_callback_skips_when_ask_back_pending() -> None:
 
 def test_should_i_run_callback_runs_normally_when_ask_back_absent() -> None:
     """No ask_back + agent is in target_agents → returns ``None``
-    (let the agent run normally)."""
+    (let the agent run normally).
 
-    cb = _make_should_i_run_callback("l5_synthesizer")
+    Refactor 2026-06-24: full_pipeline target_agents is now
+    ``["l2_eligibility", "l3_level", "l4_timeline"]`` (the ranker +
+    L5 layers were absorbed into L4).
+    """
+
+    cb = _make_should_i_run_callback("l4_timeline")
     ctx = _FakeCtx(
         {
             STATE_KEY_IDENTITY: {
@@ -169,8 +183,6 @@ def test_should_i_run_callback_runs_normally_when_ask_back_absent() -> None:
                     "l2_eligibility",
                     "l3_level",
                     "l4_timeline",
-                    "timeline_ranker",
-                    "l5_synthesizer",
                 ]
             }
         }
@@ -186,8 +198,10 @@ def test_should_i_run_callback_skips_when_agent_not_targeted() -> None:
     """If identity lists a different target set, the agent is skipped.
 
     Uses a typed IdentityProfile with intent="freshness_check" so the
-    validator derives ``target_agents=["l4_timeline", "timeline_ranker",
-    "l5_synthesizer"]`` (which excludes l2_eligibility + l3_level).
+    validator derives ``target_agents=["l4_timeline"]`` (which excludes
+    l2_eligibility + l3_level). Refactor 2026-06-24: freshness_check
+    now targets L4 only (ranker + L5 absorbed into L4).
+
     This mirrors the path live probes A2/A3/A4 took and proves the
     skip fires on typed state.
     """
@@ -197,11 +211,7 @@ def test_should_i_run_callback_skips_when_agent_not_targeted() -> None:
         raw_query="is kaggle still free?",
         intent="freshness_check",
     )
-    assert profile.target_agents == [
-        "l4_timeline",
-        "timeline_ranker",
-        "l5_synthesizer",
-    ]
+    assert profile.target_agents == ["l4_timeline"]
 
     cb = _make_should_i_run_callback("l2_eligibility")
     ctx = _FakeCtx({STATE_KEY_IDENTITY: profile})
@@ -214,9 +224,12 @@ def test_should_i_run_callback_skips_when_agent_not_targeted() -> None:
 
 def test_should_i_run_callback_runs_when_no_identity_in_state() -> None:
     """Without identity in state, be conservative and let the agent run
-    (worst case = old always-run behavior, never a silent skip)."""
+    (worst case = old always-run behavior, never a silent skip).
 
-    cb = _make_should_i_run_callback("l5_synthesizer")
+    Refactor 2026-06-24: the downstream agent is now ``l4_timeline``.
+    """
+
+    cb = _make_should_i_run_callback("l4_timeline")
     ctx = _FakeCtx({})
 
     out = _run(cb(ctx))
@@ -225,9 +238,12 @@ def test_should_i_run_callback_runs_when_no_identity_in_state() -> None:
 
 
 def test_should_i_run_callback_runs_when_no_state_attribute() -> None:
-    """If the callback context has no ``state``, let the agent run."""
+    """If the callback context has no ``state``, let the agent run.
 
-    cb = _make_should_i_run_callback("l5_synthesizer")
+    Refactor 2026-06-24: the downstream agent is now ``l4_timeline``.
+    """
+
+    cb = _make_should_i_run_callback("l4_timeline")
 
     class _NoStateCtx:
         state = None
@@ -245,6 +261,9 @@ def test_should_i_run_callback_skips_with_typed_identity_state() -> None:
     but with a real Pydantic model instance instead of a dict — proves
     the Pydantic-model delivery path works (was previously the
     failing path that probes A2/A3/A4 exposed).
+
+    Refactor 2026-06-24: freshness_check now targets ``["l4_timeline"]``
+    only (the ranker + L5 absorbed into L4).
     """
     from app.agents.schemas import IdentityProfile
 
@@ -253,13 +272,9 @@ def test_should_i_run_callback_skips_with_typed_identity_state() -> None:
         intent="freshness_check",
     )
     # Validator (IdentityProfile.model_validator) ensures target_agents
-    # is ["l4_timeline", "timeline_ranker", "l5_synthesizer"] for
-    # freshness_check (l5 added so L5 actually runs for in-scope queries).
-    assert profile.target_agents == [
-        "l4_timeline",
-        "timeline_ranker",
-        "l5_synthesizer",
-    ]
+    # is ["l4_timeline"] for freshness_check (the ranker + L5 absorbed
+    # into L4, refactor 2026-06-24).
+    assert profile.target_agents == ["l4_timeline"]
 
     ctx = _FakeCtx({STATE_KEY_IDENTITY: profile})
     cb = _make_should_i_run_callback(

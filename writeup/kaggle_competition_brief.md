@@ -119,15 +119,15 @@ Mapping each Kaggle requirement to our task status:
 | Kaggle requirement | Lumi status | Notes |
 |---|---|---|
 | Track: Agents for Good | ✅ Selected | Mission = free AI learning resources for students worldwide |
-| Key concept 1: Multi-agent system (ADK) | ✅ 5-layer pipeline | L1 → L2 → L3 → L4 → L5 (SequentialAgent, 6 sub-agents) + ranker (parallel output stage). L5 Synthesizer has zero tools and emits the final markdown recommendation. |
+| Key concept 1: Multi-agent system (ADK) | ✅ 4-layer pipeline | L1 → L2 → L3 → L4 (SequentialAgent, 4 sub-agents). L4 Timeline + Finalize emits the final markdown recommendation directly. The former L5 Synthesizer was absorbed into L4 on 2026-06-24 (refactor branch `refactor/stop-at-l4`); `app/ranking.py` retained as a library for a future real-time web-search deployment. |
 | Key concept 2: MCP Server | ✅ 2 servers | `resource-catalog` (3 tools) + `web-search` (1 tool) |
-| Key concept 3: Antigravity | 🟡 TBD — Task 28 | Demo video (Task 28 — owner-led) |
-| Key concept 4: Security features | ✅ Defense-in-depth | Schema caps, tool whitelist, semgrep, prompt-injection suite (363 tests, 9 deselected for E2E + manual) |
+| Key concept 3: Antigravity | 🟡 TBD — Task 28 | Demo video (Task 28 — owner-led) — **COMPULSORY per brief req #3** |
+| Key concept 4: Security features | ✅ Defense-in-depth | Schema caps, tool whitelist, semgrep, prompt-injection suite (378 tests, 12 deselected for E2E + manual) |
 | Key concept 5: Deployability | ✅ Task 27 | Test-deploy-then-tear-down completed 2026-06-22 (5 real gotchas captured in deploy/README.md + WRITEUP.md §6) |
 | Key concept 6: Agent skills / CLI | ✅ Task 56 | adk CLI demonstrated in WRITEUP.md §5.6 (Task 56 done). `app/agents/agent.py` exposes `root_agent = create_lumi_pipeline()`. |
 | Kaggle Writeup (≤ 2,500 words) | 🟡 §1-5 done | §6-7 pending real run data — Task 39 |
 | Media Gallery (cover image) | ✅ Task 40 | [`writeup/cover.png`](./cover.png) — 833×1065, title + 4-layer pipeline + tagline (github/test counts) |
-| Public Video (≤ 5 min) | ❌ Task 28 | Not started |
+| Public Video (≤ 5 min) | ❌ Task 28 | **COMPULSORY — must record before submit** |
 | Public Project Link | ✅ | Repo: <https://github.com/kannch8765/lumi> (already public); live demo URL pending Task 27 |
 | Documentation: README.md | ✅ | Project root |
 | No API keys in code | ✅ | `.env` gitignored, semgrep blocks AIza/sk-/AQ/ghp_ patterns |
@@ -153,3 +153,30 @@ Martyna Plomecka · Tania Rodriguez Fuentes · Sara Wolley · Brenda Flynn
 
 (These are the official judges listed on the competition page. We do not
 need to name them in the Writeup — listing is just for our awareness.)
+
+## Task 28 — Demo video minimum bar
+
+**Why it matters:** Without a YouTube URL, the submission is **invalid** (brief requirement #3 of 4). Also 10/100 points in Category 1 ("YouTube Video Submission" — clarity + conciseness + messaging: problem / why agents / architecture / demo / build).
+
+**Hard constraints:**
+- ≤ 5 minutes (over = penalized)
+- Hosted on YouTube (public, no login)
+- Must show: problem · why agents · architecture · demo · build
+
+**Recording strategy (minimum-viable, 3 takes):**
+
+1. **Take 1 — Architecture + run (3 min)** — screen-record a terminal running `adk run app/agents`. Pick a query that shows the system working: e.g. "I am a CS undergrad in Brazil, want to learn LLMs for free, in Portuguese if possible." Already proven end-to-end 2026-06-22 (see `lumi_capstone` memory, lesson about local Lumi E2E proof). This gives judges the live demo.
+
+2. **Take 2 — Multilingual + OOS + ask_back (1 min)** — three quick queries, one each in Portuguese, Japanese, and the pizza recipe OOS. Shows the routing actually working.
+
+3. **Take 3 — Voiceover (over Take 1 + Take 2)** — record audio over the screen capture. Cover: problem (students can't find free AI resources), why agents (4 layers + 60 entries curated, multilingual, OOS safe), architecture (2-3 sentence Mermaid summary), demo (the runs), build (security model + 391 tests).
+
+**Cuts / bloat to avoid:** don't record yourself coding. Don't show the full 18-30s pipeline run raw — speed it up 2x in editing. Don't read from WRITEUP.md verbatim — judges will read it. The video is the *trailer*, not the *documentary*.
+
+**Tools (all free):**
+- Screen capture: OBS Studio (Linux native) or `ffmpeg -f x11grab`
+- Edit: `ffmpeg` (no GUI) or Kdenlive / OpenShot for GUI
+- Upload: YouTube (use a personal Google account, not work)
+- Voiceover: phone recording (no need for a mic)
+
+**Estimated total wall-clock:** 60-90 min for first take + 30 min for edit + upload. Doable in one focused session.
