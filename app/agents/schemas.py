@@ -23,6 +23,45 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from app.mcp_servers.resource_catalog.schemas import ResourceOutput
 from app.routing import LUMI_AGENT_NAMES
 
+
+# Vertex AI compiles response schemas into a constrained-decoding grammar.
+# Keep Pydantic's runtime validation strict, but omit state-heavy bounds from
+# the schema sent to the model. This avoids INVALID_ARGUMENT errors caused by
+# deeply nested array/string/numeric constraints.
+_VERTEX_SCHEMA_ONLY_KEYS = {
+    "title",
+    "description",
+    "minLength",
+    "maxLength",
+    "minimum",
+    "maximum",
+    "minItems",
+    "maxItems",
+}
+
+
+def _simplify_vertex_response_schema(node):
+    if isinstance(node, dict):
+        for key in list(node):
+            if key in _VERTEX_SCHEMA_ONLY_KEYS:
+                node.pop(key, None)
+            else:
+                _simplify_vertex_response_schema(node[key])
+    elif isinstance(node, list):
+        for item in node:
+            _simplify_vertex_response_schema(item)
+    return node
+
+
+class VertexFriendlyOutput(BaseModel):
+    """Strict Pydantic model with a lighter Vertex response schema."""
+
+    @classmethod
+    def __get_pydantic_json_schema__(cls, core_schema, handler):
+        schema = handler(core_schema)
+        return _simplify_vertex_response_schema(schema)
+
+
 # ─── L1 router intent types ────────────────────────────────────────────
 
 # Names of the L-layer agents in the pipeline. Used as values for
@@ -196,7 +235,7 @@ class EligibleResource(BaseModel):
     rejected_constraints: list[str] = Field(default_factory=list, max_length=20)
 
 
-class EligibilityResult(BaseModel):
+class EligibilityResult(VertexFriendlyOutput):
     """L2's structured output — resources that match the user's eligibility.
 
     Returned into session state under ``output_key='eligibility'`` for L3
@@ -257,7 +296,7 @@ class LevelMatch(BaseModel):
     fit_score: float = Field(ge=0.0, le=1.0)
 
 
-class LevelFilterResult(BaseModel):
+class LevelFilterResult(VertexFriendlyOutput):
     """L3's structured output — resources matching the user's skill level.
 
     Drops resources that are too easy (boring) or too hard
@@ -324,7 +363,7 @@ class TimelineEntry(BaseModel):
     recommended_action: str = Field(min_length=1, max_length=200)
 
 
-class TimelineResult(BaseModel):
+class TimelineResult(VertexFriendlyOutput):
     """L4's structured output — resources ranked by timeline urgency.
 
     The orchestrator (Task 25) reads this as the final pipeline
@@ -371,7 +410,7 @@ _REFUSAL_PATTERNS = (
 )
 
 
-class RecommendationResponse(BaseModel):
+class RecommendationResponse(VertexFriendlyOutput):
     """L4's structured output — the final user-facing recommendation.
 
     Refactor 2026-06-24: L5 Synthesizer was absorbed into L4. L4 now
