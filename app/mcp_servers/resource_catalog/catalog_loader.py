@@ -27,11 +27,11 @@ def _catalog_path() -> Path:
     if the file is not at the first guess.
     """
 
-    candidates: list[Path] = []
     here = Path(__file__).resolve().parent
-    for ancestors in range(2, 6):
-        candidate = here.parents[ancestors - 1] / "resources" / _CATALOG_FILENAME
-        candidates.append(candidate)
+    candidates = [
+        parent / "resources" / _CATALOG_FILENAME
+        for parent in list(here.parents)[:5]
+    ]
     for candidate in candidates:
         if candidate.is_file():
             return candidate
