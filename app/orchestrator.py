@@ -79,7 +79,7 @@ logger = logging.getLogger(__name__)
 # filtering, so Flash-tier is sufficient everywhere. Overridable per
 # call via ``create_lumi_pipeline(model=...)`` so tests can swap in a
 # stub model without touching the default.
-DEFAULT_PIPELINE_MODEL = "gemini-3.1-flash-lite"
+DEFAULT_PIPELINE_MODEL = "gemini-2.5-flash"
 
 # Session identifiers used by :func:`run_lumi_query`. The values are
 # arbitrary stable strings — they only need to be deterministic so
@@ -405,7 +405,7 @@ def create_lumi_pipeline(
 
     Args:
         model: Gemini model name passed to each L-layer agent.
-            Defaults to ``gemini-3.1-flash-lite`` (low-latency, low-cost).
+            Defaults to ``gemini-2.5-flash`` (low-latency, low-cost).
             Override only for testing or for routing specific layers
             to a different model tier via the individual factories.
 

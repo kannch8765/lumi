@@ -37,7 +37,7 @@ from app.agents.schemas import LevelFilterResult
 # Default Gemini model. Picked for low latency — L3 does structured
 # classification + scoring on a bounded candidate set, so the smallest
 # Flash-tier model is sufficient.
-DEFAULT_L3_MODEL = "gemini-3.1-flash-lite"
+DEFAULT_L3_MODEL = "gemini-2.5-flash"
 
 # Instruction text — kept here so the agent factory stays readable.
 # Three-zone hierarchy per CONTEXT.md #18: USER / TOOL / INSTRUCTION.
@@ -172,7 +172,7 @@ def create_l3_level_agent(
     ``state['level_filter']`` to feed L4.
 
     Args:
-        model: Gemini model name. Defaults to ``gemini-3.1-flash-lite``
+        model: Gemini model name. Defaults to ``gemini-2.5-flash``
             (low-latency, low-cost model suitable for structured
             classification on a bounded set).
         before_agent_callback: Optional ADK ``before_agent_callback``.

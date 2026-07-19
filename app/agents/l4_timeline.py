@@ -295,7 +295,7 @@ def _build_all_mcp_tools() -> list[McpToolset]:
 
 
 def create_l4_timeline_agent(
-    model: str = "gemini-3.1-flash-lite",
+    model: str = "gemini-2.5-flash",
     *,
     before_agent_callback: Any | None = None,
     after_agent_callback: Any | None = None,

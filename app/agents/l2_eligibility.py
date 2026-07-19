@@ -49,7 +49,7 @@ from app.agents.schemas import EligibilityResult
 # Default Gemini model for L2. L2 reasons over a small set of catalog
 # entries (max 50 per ``search_catalog`` call), so a Flash-tier model
 # is sufficient. Override only for testing.
-DEFAULT_L2_MODEL = "gemini-3.1-flash-lite"
+DEFAULT_L2_MODEL = "gemini-2.5-flash"
 
 # System prompt for L2. Three explicit zones per CONTEXT.md #18
 # (instruction hierarchy): USER zone data, TOOL zone data (catalog
@@ -178,7 +178,7 @@ def create_l2_eligibility_agent(
     resulting :class:`EligibilityResult` to L3 (Level Filter).
 
     Args:
-        model: Gemini model name. Defaults to ``gemini-3.1-flash-lite``
+        model: Gemini model name. Defaults to ``gemini-2.5-flash``
             (low-latency, low-cost model suitable for catalog
             filtering). Override only for testing or for routing L2
             to a different model tier.
