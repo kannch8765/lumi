@@ -27,6 +27,7 @@ adk_web.log
 # Secrets — NEVER commit
 .env
 .env.*
+!.env.production.example
 *.key
 *.pem
 secrets/
