@@ -23,11 +23,9 @@ keep the Gemini free-tier daily quota reserved for dev + release work.
 
 Wall-clock budget: ~2-5 min for the full suite on Flash Lite free tier.
 
-Refactor 2026-06-24: pipeline is now 4 layers (L1 → L2 → L3 → L4).
-The former ``timeline_ranker`` + ``l5_synthesizer`` were absorbed
-into L4 Timeline + Finalize. End-to-end behavior is unchanged from
-the user's perspective — happy path still returns a
-``RecommendationResponse`` with markdown.
+Refactor 2026-06-24: pipeline is the canonical 4 layers (L1 → L2 → L3 → L4).
+End-to-end behavior is unchanged from the user's perspective —
+happy path still returns a ``RecommendationResponse`` with markdown.
 """
 
 from __future__ import annotations

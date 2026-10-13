@@ -23,10 +23,9 @@ real Gemini model (the live happy-path is covered by
      ``state['final_user_response']`` when ``out_of_scope=True``
      so the OOS path short-circuits to a single LLM call.
 
-Refactor 2026-06-24: pipeline is now 4 layers (L1 → L2 → L3 → L4).
-The former ``timeline_ranker`` + ``l5_synthesizer`` were absorbed
-into L4 Timeline + Finalize. The intent → target_agents mapping
-was updated accordingly.
+Refactor 2026-06-24: pipeline is the canonical 4 layers
+(L1 → L2 → L3 → L4). The intent → target_agents mapping is
+up to date with the 4-layer pipeline shape.
 
 Per CONTEXT.md #7 there are no mocks — these tests use a tiny
 fake ``callback_context`` that exposes ``.state`` as a plain
@@ -251,8 +250,8 @@ def test_pipeline_wires_skip_callbacks_to_downstream_agents_only() -> None:
     router can skip them; L1 itself has NO callback (the router
     always runs, by design).
 
-    Refactor 2026-06-24: the pipeline is now 4 layers (L1 → L2 →
-    L3 → L4); the former ``timeline_ranker`` no longer exists.
+    Refactor 2026-06-24: the pipeline is the canonical 4 layers
+    (L1 → L2 → L3 → L4).
     """
     pipeline = create_lumi_pipeline()
     assert isinstance(pipeline, SequentialAgent)
@@ -454,9 +453,8 @@ def test_intent_to_target_agents_mapping(
     static mapping literal. A regression in the validator or the
     routing constants is caught here.
 
-    Refactor 2026-06-24: the mapping was simplified — the former
-    ``timeline_ranker`` + ``l5_synthesizer`` are gone, so each intent
-    now targets fewer agents.
+    Refactor 2026-06-24: the mapping is for the canonical 4-layer
+    pipeline — each intent now targets fewer agents.
     """
     profile = IdentityProfile(raw_query="hello", intent=intent)  # type: ignore[arg-type]
     assert set(profile.target_agents) == expected_agents

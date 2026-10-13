@@ -23,7 +23,6 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from app.mcp_servers.resource_catalog.schemas import ResourceOutput
 from app.routing import LUMI_AGENT_NAMES
 
-
 # Vertex AI compiles response schemas into a constrained-decoding grammar.
 # Keep Pydantic's runtime validation strict, but omit state-heavy bounds from
 # the schema sent to the model. This avoids INVALID_ARGUMENT errors caused by

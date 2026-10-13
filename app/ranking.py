@@ -1,14 +1,19 @@
-"""Parallel output ranking for the Lumi pipeline.
+"""Parallel output ranking for the Lumi pipeline — library, not wired in.
 
-After L4 (Timeline Agent) produces a :class:`TimelineResult`, the
-pipeline orchestrator applies this pure ranking logic to sort the
-timeline entries by urgency, deadline proximity, and resource name.
-The function is pure — no LLM, no I/O, no side effects — so it can
-be tested in isolation and reused for the multiple ranking strategies
-ARCHITECTURE.md §Parallel Output Stage envisions (by urgency, by
-topic, by value, by sequence). Task 25 implements the "by urgency"
-strategy; future tasks can add the other three on top of this
-foundation.
+This module is the code-only ranker library. It is **not currently
+wired into the orchestrator** — retained for a future real-time
+web-search deployment where deadline ranking matters (Phase G /
+task 33). The current 4-layer Lumi pipeline (L1 → L2 → L3 → L4)
+emits ``RecommendationResponse`` directly from L4.
+
+After L4 (Timeline Agent) produces a :class:`TimelineResult`, this
+pure ranking logic would sort the timeline entries by urgency,
+deadline proximity, and resource name. The function is pure — no
+LLM, no I/O, no side effects — so it can be tested in isolation
+and reused for the multiple ranking strategies ARCHITECTURE.md
+§Parallel Output Stage envisions (by urgency, by topic, by value,
+by sequence). Task 25 implements the "by urgency" strategy; future
+tasks can add the other three on top of this foundation.
 
 The sort order is the canonical ordering defined by :class:`Urgency`
 (``CRITICAL → HIGH → MEDIUM → LOW → STALE``) plus two tiebreakers:

@@ -16,12 +16,9 @@ Pipeline shape::
     └── l3_level           -> state['level_filter']          :class:`LevelFilterResult`
     └── l4_timeline        -> state['final_recommendation']  :class:`RecommendationResponse`
 
-Refactor 2026-06-24: the former ``timeline_ranker`` (code-only sort)
-and ``l5_synthesizer`` (markdown emit) layers were dropped. L4 now
-absorbs both responsibilities — it annotates resources by timeline
-urgency AND emits the user-facing markdown recommendation in a
-single LLM call. The orchestrator dropped two layers (ranker + L5)
-and one state key (``ranked_timeline``).
+Refactor 2026-06-24: the orchestrator is a canonical 4-layer Lumi pipeline.
+L4 absorbs the final recommendation emit responsibility in a single LLM
+call. The pipeline shape is L1 → L2 → L3 → L4.
 
 Ask-back pattern
 ================
@@ -333,12 +330,9 @@ def _make_l1_after_agent_callback():
     When L1 marks a query as ``out_of_scope``, the
     ``IdentityProfile.target_agents`` list is ``[]`` — so every
     downstream agent's ``before_agent_callback`` skips itself with
-    zero LLM calls. Previously the apology lived in the ranker's
-    ``after_agent_callback``, but the ranker is itself skipped on the
-    OOS path (``timeline_ranker`` is not in ``target_agents``), so the
-    final-user-response key was never written. L1's callback fires
-    unconditionally (L1 is the router — it always runs), making it
-    the right place to write the OOS response.
+    zero LLM calls. L1's callback fires unconditionally (L1 is
+    the router — it always runs), making it the right place to
+    write the OOS response.
 
     Refactor 2026-06-25: the response shape changed from a
     natural-language apology string to a structured
@@ -393,10 +387,8 @@ def create_lumi_pipeline(
 
     Returns an ADK :class:`SequentialAgent` (``name='lumi_pipeline'``)
     that runs L1 → L2 → L3 → L4 in order. All four sub-agents are
-    the L-layer agents from :mod:`app.agents`. The former
-    ``timeline_ranker`` (code-only sort) and ``l5_synthesizer``
-    (markdown emit) layers were absorbed into L4 on 2026-06-24 —
-    see the refactor plan and the ``refactor/stop-at-l4`` branch.
+    the L-layer agents from :mod:`app.agents`. The canonical
+    4-layer pipeline shape was finalized on 2026-06-24.
 
     The orchestrator itself has NO tools. Per CONTEXT.md #10, the
     tool whitelist is the kill switch — adding a tool here would
@@ -491,11 +483,9 @@ async def run_lumi_query(
     4. Empty :class:`TimelineResult()` — last-resort default so
        callers always receive a structured payload.
 
-    Refactor 2026-06-24: the ``state['ranked_timeline']`` and
-    ``state['timeline']`` branches were removed. The ranker is
-    gone (L4 emits its own URGENCY-ordered recommendation), and L4
-    no longer writes a TimelineResult intermediate (L4 writes
-    ``RecommendationResponse`` directly).
+    Refactor 2026-06-24: the canonical 4-layer pipeline emits
+    ``RecommendationResponse`` directly from L4. L4 is the final
+    L-layer agent that owns the user-facing markdown emit.
 
     Args:
         query: The user's free-text request (e.g. ``"I'm a CS

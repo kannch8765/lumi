@@ -77,12 +77,10 @@ The same four-stage shape is enforced in code by
 sub-agents in fixed order). The orchestrator itself holds NO tools
 (CONTEXT.md #10 — the tool whitelist is the kill switch).
 
-> **Refactor 2026-06-24:** The pipeline is now 4 layers (L1 → L2 → L3 → L4).
-> The former timeline ranker (code-only sort) and L5 Synthesizer (markdown
-> emit) were absorbed into L4 Timeline + Finalize. See commit on branch
-> `refactor/stop-at-l4` for the full diff. `app/ranking.py` is retained
-> as a library for a future real-time web-search deployment where deadline
-> ranking matters (Phase G / Task 33).
+> **Refactor 2026-06-24:** The pipeline is the canonical 4 layers
+> (L1 → L2 → L3 → L4). `app/ranking.py` is retained as a library for
+> a future real-time web-search deployment where deadline ranking
+> matters (Phase G / Task 33).
 
 ### L1: Identity Agent
 

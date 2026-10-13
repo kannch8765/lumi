@@ -572,3 +572,39 @@ def test_timeline_result_ask_back_defaults_to_none() -> None:
     result = TimelineResult()
     assert result.ask_back is None
     assert classify_days_until_deadline(365) is Urgency.LOW
+
+
+# ─── L5 Synthesizer behavior absorbed into L4 (2026-06-24 refactor) ────
+
+
+def test_l4_includes_explainer_first_rule() -> None:
+    """L4's prompt mentions ``Pre-coding explainer-first`` rule.
+
+    Refactor 2026-06-24: L5's instruction was absorbed into L4, so
+    L4's prompt now contains the explainer-first rule that was
+    formerly L5's responsibility.
+    """
+    assert "Pre-coding" in _L4_INSTRUCTION or "explainer" in _L4_INSTRUCTION
+
+
+def test_l4_includes_urgency_grouping() -> None:
+    """L4's prompt mentions URGENCY headers + URGENCY→STALE order.
+
+    Refactor 2026-06-24: L5's URGENCY grouping was absorbed into L4.
+    """
+    assert "URGENCY" in _L4_INSTRUCTION
+
+
+def test_l4_emits_recommendation_response() -> None:
+    """The factory returns LlmAgent with ``output_schema=RecommendationResponse``.
+
+    Refactor 2026-06-24: L4 emits ``RecommendationResponse`` directly
+    after L5 was absorbed into L4.
+    """
+    from google.adk.agents import LlmAgent
+
+    from app.agents.schemas import RecommendationResponse
+
+    agent = create_l4_timeline_agent()
+    assert isinstance(agent, LlmAgent)
+    assert agent.output_schema is RecommendationResponse

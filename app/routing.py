@@ -28,9 +28,7 @@ from __future__ import annotations
 
 # Sub-agent names that can appear in IdentityProfile.target_agents.
 # Order matches the pipeline order in create_lumi_pipeline().
-# Refactor 2026-06-24: timeline_ranker + l5_synthesizer dropped — L4
-# emits RecommendationResponse directly (URGENCY grouping + markdown
-# formatting absorbed from L5's instruction).
+# The canonical 4-layer Lumi pipeline is L1 → L2 → L3 → L4.
 LUMI_AGENT_NAMES: tuple[str, ...] = (
     "l2_eligibility",
     "l3_level",

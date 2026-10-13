@@ -18,10 +18,9 @@ a duck-typed object is sufficient.
 Per CONTEXT.md #7 — no mocks of the production code; we exercise the
 real factory functions with synthetic state.
 
-Refactor 2026-06-24: the pipeline is now 4 layers (L1 → L2 → L3 → L4).
-The former ``timeline_ranker`` + ``l5_synthesizer`` were absorbed into
-L4 Timeline + Finalize. The skip-callback agent name used in these
-tests is now ``"l4_timeline"`` instead of ``"l5_synthesizer"``.
+Refactor 2026-06-24: the pipeline is the canonical 4 layers
+(L1 → L2 → L3 → L4). The skip-callback agent name used in these
+tests is ``"l4_timeline"``.
 """
 
 from __future__ import annotations
@@ -153,8 +152,7 @@ def test_should_i_run_callback_skips_when_ask_back_pending() -> None:
     """When ``state['ask_back']`` is set, the callback returns empty
     ``Content`` to skip the agent (zero LLM calls).
 
-    Refactor 2026-06-24: the downstream agent is now ``l4_timeline``
-    (was ``l5_synthesizer`` pre-refactor).
+    Refactor 2026-06-24: the downstream agent is ``l4_timeline``.
     """
 
     cb = _make_should_i_run_callback("l4_timeline")

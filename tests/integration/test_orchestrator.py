@@ -12,9 +12,8 @@ shape (type, name, ``output_key``, presence of the callback) so the
 tests stay useful even when the agent factories evolve their
 internal model wiring.
 
-Refactor 2026-06-24: the pipeline is now 4 layers (L1 → L2 → L3 →
-L4) — the former ``timeline_ranker`` (code-only sort) and
-``l5_synthesizer`` (markdown emit) layers were absorbed into L4.
+Refactor 2026-06-24: the pipeline is the canonical 4 layers
+(L1 → L2 → L3 → L4).
 """
 
 from __future__ import annotations
@@ -55,10 +54,7 @@ def test_pipeline_name_is_lumi_pipeline() -> None:
 def test_pipeline_has_four_sub_agents() -> None:
     """The pipeline has exactly four sub-agents: L1, L2, L3, L4.
 
-    Refactor 2026-06-24: the former ``timeline_ranker`` (code-only
-    sort) and ``l5_synthesizer`` (markdown emit) layers were
-    absorbed into L4 Timeline + Finalize. See the
-    ``refactor/stop-at-l4`` branch.
+    The canonical 4-layer Lumi pipeline shape.
     """
     pipeline = create_lumi_pipeline()
     assert len(pipeline.sub_agents) == 4

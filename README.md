@@ -56,9 +56,8 @@ flowchart TD
     User --> L1 --> L2 --> L3 --> L4 --> Output
 ```
 
-> **Refactor 2026-06-24:** Pipeline is 4 layers (L1 → L2 → L3 → L4). The
-> former timeline ranker + L5 Synthesizer were absorbed into L4 Timeline
-> + Finalize. URGENCY buckets (CRITICAL/HIGH/MEDIUM/LOW/STALE) are kept
+> **Refactor 2026-06-24:** Pipeline is 4 layers (L1 → L2 → L3 → L4).
+> URGENCY buckets (CRITICAL/HIGH/MEDIUM/LOW/STALE) are kept
 > as **internal classification only** — the user-facing markdown uses
 > natural language, never bucket headers (sou 2026-06-25 feedback).
 > See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full design.

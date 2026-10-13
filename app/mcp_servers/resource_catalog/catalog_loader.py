@@ -29,8 +29,7 @@ def _catalog_path() -> Path:
 
     here = Path(__file__).resolve().parent
     candidates = [
-        parent / "resources" / _CATALOG_FILENAME
-        for parent in list(here.parents)[:5]
+        parent / "resources" / _CATALOG_FILENAME for parent in list(here.parents)[:5]
     ]
     for candidate in candidates:
         if candidate.is_file():
